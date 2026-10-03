@@ -1,0 +1,39 @@
+name: Build and native checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      LC_ALL: C.UTF-8
+      OVMF_CODE: /usr/share/OVMF/OVMF_CODE_4M.fd
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install development tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3-pil nodejs grub-pc-bin \
+            grub-efi-amd64-bin xorriso mtools dosfstools ntfs-3g \
+            qemu-system-x86 ovmf gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+      - name: Build x86 boot media
+        run: make -j4
+      - name: Run host checks
+        run: make check check-security-host check-package-host check-v7-host check-v8-host check-wasm-host
+      - name: Check independent disk fixtures and runtime
+        run: make check-runtime
+      - name: Check native mouse input in BIOS and UEFI
+        run: |
+          python3 tests/spice_mouse_vm_test.py bios
+          python3 tests/spice_mouse_vm_test.py uefi
+      - name: Build ARM64 serial development target
+        run: make arm64

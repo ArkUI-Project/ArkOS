@@ -1,0 +1,3 @@
+https://github.com/wasm3/wasm3
+commit 28ecb9af6d2040e474a70f7cb7f43666740141fb
+archive_sha256 5ecbb8851bd9acb54a83be10f0536167cb0da13b007406578761672b0bd94b18

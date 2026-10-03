@@ -1,0 +1,94 @@
+{
+  "hello": {
+    "result": 42,
+    "error": null
+  },
+  "fibonacci": {
+    "result": 55,
+    "error": null
+  },
+  "memory": {
+    "result": 125,
+    "error": null
+  },
+  "grow_limit": {
+    "result": -1,
+    "error": null
+  },
+  "float": {
+    "result": 4,
+    "error": null
+  },
+  "round": {
+    "result": 2,
+    "error": null
+  },
+  "sqrt": {
+    "result": 9,
+    "error": null
+  },
+  "table": {
+    "result": 9,
+    "error": null
+  },
+  "global": {
+    "result": 6,
+    "error": null
+  },
+  "wasi": {
+    "result": 41,
+    "error": null
+  },
+  "wasi_exit": {
+    "result": null,
+    "error": "exit7"
+  },
+  "out_of_bounds": {
+    "result": null,
+    "error": "bounds"
+  },
+  "divide_zero": {
+    "result": null,
+    "error": "divide"
+  },
+  "loop": {
+    "result": null,
+    "error": "gas"
+  },
+  "recursion": {
+    "result": null,
+    "error": "stack"
+  },
+  "bad_import": {
+    "result": null,
+    "error": "import"
+  },
+  "bad_pointer": {
+    "result": null,
+    "error": "bounds"
+  },
+  "invalid_type": {
+    "result": null,
+    "error": "type"
+  },
+  "truncated": {
+    "result": null,
+    "error": "parse"
+  },
+  "floor_neg": {
+    "result": -2,
+    "error": null
+  },
+  "ceil_neg": {
+    "result": -1,
+    "error": null
+  },
+  "trunc_neg": {
+    "result": -1,
+    "error": null
+  },
+  "round_even": {
+    "result": -2,
+    "error": null
+  }
+}
