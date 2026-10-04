@@ -13,8 +13,8 @@
 #define INODE_BYTES 64u
 #define INODES_PER_BLOCK 64u
 #define MAX_BITMAP 4u
-#define MAX_INODE_BLOCKS 1024u
-#define INDEX_SLOTS 1024u
+#define INDEX_DATA 1023u
+#define ICACHE 8u
 #define MAX_CHAIN 128u
 #define NAME_MAX 255u
 #define PATH_MAX 1023u
@@ -38,16 +38,23 @@ static const char *last_error = "";
 static bool mounted, building;
 static uint32_t total_blocks, journal_block, bitmap_count, index_block, iblock_count, reserved_prefix;
 static uint32_t bitmap_loc[MAX_BITMAP];
-static uint32_t iblock_loc[MAX_INODE_BLOCKS];
-static uint8_t iblock_dirty[MAX_INODE_BLOCKS];
 static uint64_t generation;
+static uint64_t used_live;
 static uint8_t bitmap_mem[MAX_BITMAP * BLOCK];
 static uint8_t committed_mem[MAX_BITMAP * BLOCK];
 static uint8_t quarantine_mem[MAX_BITMAP * BLOCK];
-static Inode itab[MAX_INODE_BLOCKS * INODES_PER_BLOCK];
-static uint32_t words_cache_block;
-static uint32_t words_cache[1024];
-static uint32_t commit_loc[MAX_INODE_BLOCKS];
+typedef struct {
+    uint32_t index;
+    uint32_t loc;
+    uint8_t used, dirty, fresh;
+    Inode ent[INODES_PER_BLOCK];
+} IBlock;
+static IBlock icache[ICACHE];
+static uint32_t words_cache_block[2];
+static uint32_t words_cache[2][1024];
+static uint8_t words_cache_hand;
+static uint32_t inode_loads;
+_Static_assert(sizeof(icache) < 64u * 1024u, "inode cache must not be a resident table");
 #ifdef ARK_STORAGE_HOST_TEST
 static int fail_superblock;
 #endif
@@ -129,8 +136,9 @@ static bool write_block(uint32_t block, const uint8_t *buf) {
         return false;
     if (reserved_prefix && block < reserved_prefix)
         return false;
-    if (block == words_cache_block)
-        words_cache_block = 0;
+    for (unsigned s = 0; s < 2; ++s)
+        if (words_cache_block[s] == block)
+            words_cache_block[s] = 0;
     return disk->write(block * 8u, 8, buf);
 }
 static uint32_t alloc_block(void) {
@@ -171,17 +179,20 @@ static void load_words(uint32_t block, uint32_t *words) {
     mem_set(words, 0, 1024u * sizeof(uint32_t));
     if (!block)
         return;
-    if (block == words_cache_block) {
-        mem_copy(words, words_cache, sizeof words_cache);
-        return;
+    for (unsigned slot = 0; slot < 2; ++slot) {
+        if (words_cache_block[slot] == block) {
+            mem_copy(words, words_cache[slot], sizeof words_cache[slot]);
+            return;
+        }
     }
     uint8_t raw[BLOCK];
     if (!read_block(block, raw))
         return;
     for (unsigned i = 0; i < 1024; ++i)
         words[i] = get32(raw + i * 4);
-    words_cache_block = block;
-    mem_copy(words_cache, words, sizeof words_cache);
+    unsigned slot = words_cache_hand++ & 1u;
+    words_cache_block[slot] = block;
+    mem_copy(words_cache[slot], words, sizeof words_cache[slot]);
 }
 static bool words_empty(const uint32_t *words) {
     for (unsigned i = 0; i < 1024; ++i)
@@ -231,10 +242,8 @@ static bool map_set(Inode *ino, uint32_t logical, uint32_t value, uint32_t *old)
     uint32_t rest = logical - DIRECT;
     uint32_t hops = rest / INDIRECT_SLOTS;
     uint32_t slot = rest % INDIRECT_SLOTS;
-    if (hops >= MAX_CHAIN) {
-        last_error = "空间不足，未保存";
+    if (hops >= MAX_CHAIN)
         return false;
-    }
     uint32_t ids[MAX_CHAIN];
     mem_set(ids, 0, sizeof ids);
     uint32_t link = ino->indirect;
@@ -278,26 +287,111 @@ static bool map_set(Inode *ino, uint32_t logical, uint32_t value, uint32_t *old)
     ino->indirect = leaf;
     return true;
 }
+static void icache_clear(void) {
+    mem_set(icache, 0, sizeof icache);
+    mem_set(words_cache_block, 0, sizeof words_cache_block);
+}
+static IBlock *icache_find(uint32_t index) {
+    for (uint32_t i = 0; i < ICACHE; ++i)
+        if (icache[i].used && icache[i].index == index)
+            return &icache[i];
+    return 0;
+}
+static IBlock *icache_slot(void) {
+    for (uint32_t i = 0; i < ICACHE; ++i)
+        if (!icache[i].used)
+            return &icache[i];
+    for (uint32_t i = 0; i < ICACHE; ++i)
+        if (icache[i].used && !icache[i].dirty)
+            return &icache[i];
+    return 0;
+}
+static bool index_lookup(uint32_t iblock, uint32_t *loc) {
+    IBlock *hit = icache_find(iblock);
+    if (hit && hit->fresh) {
+        *loc = hit->loc;
+        return hit->loc != 0;
+    }
+    uint32_t hop = iblock / INDEX_DATA;
+    uint32_t slot = iblock % INDEX_DATA;
+    uint32_t link = index_block;
+    for (uint32_t h = 0;; ++h) {
+        if (!link)
+            return false;
+        uint32_t words[1024];
+        load_words(link, words);
+        if (h == hop) {
+            *loc = words[slot];
+            return *loc != 0;
+        }
+        link = words[1023];
+    }
+}
+static bool load_iblock(IBlock *c, uint32_t index) {
+    uint32_t loc = 0;
+    if (!index_lookup(index, &loc))
+        return false;
+    uint8_t raw[BLOCK];
+    if (!read_block(loc, raw))
+        return false;
+    ++inode_loads;
+    mem_set(c, 0, sizeof *c);
+    c->used = 1;
+    c->index = index;
+    c->loc = loc;
+    for (uint32_t s = 0; s < INODES_PER_BLOCK; ++s)
+        unpack_inode(raw + s * INODE_BYTES, &c->ent[s]);
+    return true;
+}
+static IBlock *hold_iblock(uint32_t index) {
+    IBlock *c = icache_find(index);
+    if (c)
+        return c;
+    c = icache_slot();
+    if (!c || !load_iblock(c, index))
+        return 0;
+    return c;
+}
+static Inode *ino_ref(uint32_t ino) {
+    IBlock *c = hold_iblock(ino / INODES_PER_BLOCK);
+    if (!c) {
+        static Inode none;
+        mem_set(&none, 0, sizeof none);
+        return &none;
+    }
+    return &c->ent[ino % INODES_PER_BLOCK];
+}
 static void mark_inode(uint32_t ino) {
-    if (ino / INODES_PER_BLOCK < iblock_count)
-        iblock_dirty[ino / INODES_PER_BLOCK] = 1;
+    IBlock *c = icache_find(ino / INODES_PER_BLOCK);
+    if (c)
+        c->dirty = 1;
 }
 static uint32_t alloc_inode(void) {
-    for (uint32_t n = 1; n < iblock_count * INODES_PER_BLOCK; ++n) {
-        if (!itab[n].type)
-            return n;
-    }
-    if (iblock_count >= MAX_INODE_BLOCKS || iblock_count >= INDEX_SLOTS) {
-        last_error = "空间不足，未保存";
-        return 0;
+    if (iblock_count) {
+        IBlock *last = hold_iblock(iblock_count - 1);
+        if (last) {
+            uint32_t base = (iblock_count - 1) * INODES_PER_BLOCK;
+            uint32_t s0 = base ? 0u : 1u;
+            for (uint32_t s = s0; s < INODES_PER_BLOCK; ++s)
+                if (!last->ent[s].type)
+                    return base + s;
+        }
     }
     uint32_t block = alloc_block();
     if (!block)
         return 0;
-    iblock_loc[iblock_count] = block;
-    iblock_dirty[iblock_count] = 1;
+    IBlock *c = icache_slot();
+    if (!c) {
+        free_block(block);
+        return 0;
+    }
+    mem_set(c, 0, sizeof *c);
+    c->used = 1;
+    c->dirty = 1;
+    c->fresh = 1;
+    c->index = iblock_count;
+    c->loc = block;
     uint32_t base = iblock_count * INODES_PER_BLOCK;
-    mem_set(&itab[base], 0, sizeof(Inode) * INODES_PER_BLOCK);
     ++iblock_count;
     return base ? base : 1;
 }
@@ -506,15 +600,15 @@ static bool dir_remove(Inode *dir, const char *name, uint32_t nlen) {
 static bool lookup_path(const char *canon, uint32_t *ino) {
     if (str_eq(canon, "/")) {
         *ino = 1;
-        return itab[1].type == 2;
+        return ino_ref(1)->type == 2;
     }
     char parent[1024], name[256];
     uint32_t nlen = 0, pin = 0;
     if (!split_last(canon, parent, name, &nlen) || !lookup_path(parent, &pin))
         return false;
-    if (itab[pin].type != 2)
+    if (ino_ref(pin)->type != 2)
         return false;
-    return dir_walk(&itab[pin], name, nlen, ino, 0, 0);
+    return dir_walk(ino_ref(pin), name, nlen, ino, 0, 0);
 }
 static bool write_bytes(Inode *ino, const uint8_t *data, uint64_t len) {
     uint32_t new_blocks = len ? (uint32_t)((len + BLOCK - 1) / BLOCK) : 0;
@@ -540,13 +634,117 @@ static bool write_bytes(Inode *ino, const uint8_t *data, uint64_t len) {
         if (old)
             free_block(old);
     }
+    if (ino->type == 1) {
+        if (len >= ino->size)
+            used_live += len - ino->size;
+        else
+            used_live -= ino->size - len;
+    }
     ino->size = len;
     return true;
 }
-static bool pack_iblock(uint32_t index, uint8_t *raw) {
+static void pack_cached(const IBlock *c, uint8_t *raw) {
     mem_set(raw, 0, BLOCK);
     for (uint32_t s = 0; s < INODES_PER_BLOCK; ++s)
-        pack_inode(&itab[index * INODES_PER_BLOCK + s], raw + s * INODE_BYTES);
+        pack_inode(&c->ent[s], raw + s * INODE_BYTES);
+}
+static bool inodes_dirty(void) {
+    for (uint32_t i = 0; i < ICACHE; ++i)
+        if (icache[i].used && icache[i].dirty)
+            return true;
+    return false;
+}
+static bool flush_inodes(bool cow) {
+    uint8_t raw[BLOCK];
+    for (uint32_t i = 0; i < ICACHE; ++i) {
+        IBlock *c = &icache[i];
+        if (!c->used || !c->dirty)
+            continue;
+        uint32_t dest = c->loc;
+        uint32_t old = 0;
+        if (cow && !c->fresh) {
+            dest = alloc_block();
+            if (!dest)
+                return false;
+            old = c->loc;
+        }
+        pack_cached(c, raw);
+        if (!write_block(dest, raw))
+            return false;
+        if (old)
+            free_block(old);
+        c->loc = dest;
+        c->fresh = 1;
+    }
+    return true;
+}
+static bool rewrite_index(bool cow) {
+    uint32_t count = iblock_count ? iblock_count : 1u;
+    uint32_t hops = (count + INDEX_DATA - 1u) / INDEX_DATA;
+    uint32_t old = index_block;
+    uint32_t new_head = 0;
+    uint32_t prev_neu = 0;
+    uint32_t prev_words[1024];
+    int have_prev = 0;
+    uint8_t raw[BLOCK];
+    for (uint32_t h = 0; h < hops; ++h) {
+        uint32_t words[1024];
+        mem_set(words, 0, sizeof words);
+        uint32_t next_old = 0;
+        if (old) {
+            load_words(old, words);
+            next_old = words[1023];
+        }
+        words[1023] = 0;
+        for (uint32_t slot = 0; slot < INDEX_DATA; ++slot) {
+            uint32_t idx = h * INDEX_DATA + slot;
+            if (idx >= count) {
+                words[slot] = 0;
+                continue;
+            }
+            IBlock *c = icache_find(idx);
+            if (c)
+                words[slot] = c->loc;
+            else if (!words[slot])
+                return false;
+        }
+        uint32_t neu;
+        if (!cow && h == 0)
+            neu = index_block;
+        else {
+            neu = alloc_block();
+            if (!neu)
+                return false;
+        }
+        if (!have_prev)
+            new_head = neu;
+        else {
+            prev_words[1023] = neu;
+            for (unsigned i = 0; i < 1024; ++i)
+                put32(raw + i * 4, prev_words[i]);
+            if (!write_block(prev_neu, raw))
+                return false;
+        }
+        mem_copy(prev_words, words, sizeof words);
+        prev_neu = neu;
+        have_prev = 1;
+        old = next_old;
+    }
+    for (unsigned i = 0; i < 1024; ++i)
+        put32(raw + i * 4, prev_words[i]);
+    if (!write_block(prev_neu, raw))
+        return false;
+    if (cow) {
+        uint32_t link = index_block;
+        while (link) {
+            uint32_t words[1024];
+            load_words(link, words);
+            uint32_t next = words[1023];
+            free_block(link);
+            link = next;
+        }
+    }
+    index_block = new_head;
     return true;
 }
 static void fill_super(uint8_t *sec, uint64_t gen, const uint32_t *bm, uint32_t index, uint32_t inodes) {
@@ -562,6 +760,7 @@ static void fill_super(uint8_t *sec, uint64_t gen, const uint32_t *bm, uint32_t 
     put32(sec + 40, inodes);
     put32(sec + 44, bitmap_count);
     put32(sec + 48, index);
+    put64(sec + 68, used_live);
     for (uint32_t i = 0; i < MAX_BITMAP; ++i)
         put32(sec + 52 + i * 4, i < bitmap_count ? bm[i] : 0);
     put32(sec + 508, crc32(sec, 508));
@@ -591,12 +790,8 @@ static bool write_commit_sector(const uint8_t *sec) {
 }
 static bool reload(void);
 static bool commit_cow(void) {
-    bool dirty = false;
-    for (uint32_t i = 0; i < iblock_count; ++i)
-        if (iblock_dirty[i])
-            dirty = true;
-    uint32_t new_bm[MAX_BITMAP], new_index = index_block;
-    uint32_t *new_loc = commit_loc;
+    bool dirty = inodes_dirty();
+    uint32_t new_bm[MAX_BITMAP];
     for (uint32_t i = 0; i < bitmap_count; ++i) {
         new_bm[i] = alloc_block();
         if (!new_bm[i]) {
@@ -606,54 +801,12 @@ static bool commit_cow(void) {
             return false;
         }
     }
-    if (dirty) {
-        new_index = alloc_block();
-        if (!new_index) {
-            const char *saved = last_error;
-            reload();
-            last_error = saved;
-            return false;
-        }
-    }
-    for (uint32_t i = 0; i < iblock_count; ++i) {
-        if (iblock_dirty[i]) {
-            new_loc[i] = alloc_block();
-            if (!new_loc[i]) {
-                const char *saved = last_error;
-                reload();
-                last_error = saved;
-                return false;
-            }
-        } else
-            new_loc[i] = iblock_loc[i];
+    if (dirty && (!flush_inodes(true) || !rewrite_index(true))) {
+        reload();
+        return false;
     }
     for (uint32_t i = 0; i < bitmap_count; ++i)
         free_block(bitmap_loc[i]);
-    if (dirty) {
-        free_block(index_block);
-        for (uint32_t i = 0; i < iblock_count; ++i)
-            if (iblock_dirty[i])
-                free_block(iblock_loc[i]);
-    }
-    uint8_t raw[BLOCK];
-    for (uint32_t i = 0; i < iblock_count; ++i) {
-        if (!iblock_dirty[i])
-            continue;
-        pack_iblock(i, raw);
-        if (!write_block(new_loc[i], raw)) {
-            reload();
-            return false;
-        }
-    }
-    if (dirty) {
-        mem_set(raw, 0, sizeof raw);
-        for (uint32_t i = 0; i < iblock_count; ++i)
-            put32(raw + i * 4, new_loc[i]);
-        if (!write_block(new_index, raw)) {
-            reload();
-            return false;
-        }
-    }
     for (uint32_t i = 0; i < bitmap_count; ++i) {
         if (!write_block(new_bm[i], bitmap_mem + i * BLOCK)) {
             reload();
@@ -667,39 +820,26 @@ static bool commit_cow(void) {
     uint8_t sec[SECTOR];
     uint64_t gen = generation + 1;
     uint32_t inodes = iblock_count;
-    fill_commit(sec, gen, new_bm, new_index, inodes);
+    fill_commit(sec, gen, new_bm, index_block, inodes);
     if (!write_commit_sector(sec) || !disk->flush()) {
         reload();
         return false;
     }
-    fill_super(sec, gen, new_bm, new_index, inodes);
+    fill_super(sec, gen, new_bm, index_block, inodes);
     if (!write_super_sector(sec) || !disk->flush()) {
         reload();
         return false;
     }
     for (uint32_t i = 0; i < bitmap_count; ++i)
         bitmap_loc[i] = new_bm[i];
-    index_block = new_index;
-    for (uint32_t i = 0; i < iblock_count; ++i) {
-        iblock_loc[i] = new_loc[i];
-        iblock_dirty[i] = 0;
-    }
+    icache_clear();
     generation = gen;
     snapshot_bits();
     last_error = "";
     return true;
 }
 static bool publish_first(void) {
-    uint8_t raw[BLOCK];
-    for (uint32_t i = 0; i < iblock_count; ++i) {
-        pack_iblock(i, raw);
-        if (!write_block(iblock_loc[i], raw))
-            return false;
-    }
-    mem_set(raw, 0, sizeof raw);
-    for (uint32_t i = 0; i < iblock_count; ++i)
-        put32(raw + i * 4, iblock_loc[i]);
-    if (!write_block(index_block, raw))
+    if (!flush_inodes(false) || !rewrite_index(false))
         return false;
     for (uint32_t i = 0; i < bitmap_count; ++i)
         if (!write_block(bitmap_loc[i], bitmap_mem + i * BLOCK))
@@ -716,7 +856,7 @@ static bool publish_first(void) {
     generation = 1;
     mounted = true;
     building = false;
-    mem_set(iblock_dirty, 0, sizeof iblock_dirty);
+    icache_clear();
     snapshot_bits();
     last_error = "";
     return true;
@@ -734,7 +874,7 @@ static bool load_tree(const uint8_t *sec) {
     bitmap_count = get32(sec + 44);
     index_block = get32(sec + 48);
     if (!total_blocks || total_blocks > disk->sectors / 8 || bitmap_count == 0 ||
-        bitmap_count > MAX_BITMAP || iblock_count == 0 || iblock_count > MAX_INODE_BLOCKS ||
+        bitmap_count > MAX_BITMAP || iblock_count == 0 || iblock_count > total_blocks ||
         journal_block >= total_blocks || index_block >= total_blocks)
         return false;
     mem_set(bitmap_mem, 0, sizeof bitmap_mem);
@@ -743,20 +883,13 @@ static bool load_tree(const uint8_t *sec) {
         if (!bitmap_loc[i] || bitmap_loc[i] >= total_blocks || !read_block(bitmap_loc[i], bitmap_mem + i * BLOCK))
             return false;
     }
-    uint8_t index_raw[BLOCK], raw[BLOCK];
-    if (!read_block(index_block, index_raw))
-        return false;
-    mem_set(itab, 0, sizeof itab);
-    for (uint32_t i = 0; i < iblock_count; ++i) {
-        iblock_loc[i] = get32(index_raw + i * 4);
-        iblock_dirty[i] = 0;
-        if (!iblock_loc[i] || !read_block(iblock_loc[i], raw))
+    icache_clear();
+    used_live = get64(sec + 68);
+    {
+        IBlock *root = hold_iblock(0);
+        if (!root || root->ent[1].type != 2)
             return false;
-        for (uint32_t s = 0; s < INODES_PER_BLOCK; ++s)
-            unpack_inode(raw + s * INODE_BYTES, &itab[i * INODES_PER_BLOCK + s]);
     }
-    if (itab[1].type != 2)
-        return false;
     mem_set(committed_mem, 0, sizeof committed_mem);
     mem_set(quarantine_mem, 0, sizeof quarantine_mem);
     mem_copy(committed_mem, bitmap_mem, sizeof committed_mem);
@@ -793,9 +926,8 @@ static bool layout(uint32_t prefix) {
     mem_set(bitmap_mem, 0, sizeof bitmap_mem);
     mem_set(committed_mem, 0, sizeof committed_mem);
     mem_set(quarantine_mem, 0, sizeof quarantine_mem);
-    words_cache_block = 0;
-    mem_set(itab, 0, sizeof itab);
-    mem_set(iblock_dirty, 0, sizeof iblock_dirty);
+    icache_clear();
+    used_live = 0;
     total_blocks = disk->sectors / 8u;
     bitmap_count = (total_blocks + 32767u) / 32768u;
     if (!bitmap_count)
@@ -811,7 +943,15 @@ static bool layout(uint32_t prefix) {
     for (uint32_t i = 0; i < bitmap_count; ++i)
         bitmap_loc[i] = cursor++;
     index_block = cursor++;
-    iblock_loc[0] = cursor++;
+    {
+        uint32_t ib = cursor++;
+        icache[0].used = 1;
+        icache[0].dirty = 1;
+        icache[0].fresh = 1;
+        icache[0].index = 0;
+        icache[0].loc = ib;
+        icache[0].ent[1].type = 2;
+    }
     iblock_count = 1;
     if (cursor >= total_blocks) {
         last_error = "空间不足，未保存";
@@ -819,8 +959,6 @@ static bool layout(uint32_t prefix) {
     }
     for (uint32_t b = 0; b < cursor; ++b)
         bit_set(b, true);
-    itab[1].type = 2;
-    iblock_dirty[0] = 1;
     generation = 0;
     building = true;
     mounted = false;
@@ -834,12 +972,12 @@ static bool add_file(const char *canon, const uint8_t *data, uint64_t len, bool 
         return false;
     if (make_parent && !ensure_dir(parent))
         return false;
-    if (!lookup_path(parent, &pin) || itab[pin].type != 2)
+    if (!lookup_path(parent, &pin) || ino_ref(pin)->type != 2)
         return false;
-    if (dir_walk(&itab[pin], name, nlen, &ino, 0, 0)) {
-        if (itab[ino].type != 1)
+    if (dir_walk(ino_ref(pin), name, nlen, &ino, 0, 0)) {
+        if (ino_ref(ino)->type != 1)
             return false;
-        if ((itab[ino].flags & 1u) && overwrite) {
+        if ((ino_ref(ino)->flags & 1u) && overwrite) {
             last_error = "当前文件只读";
             return false;
         }
@@ -847,25 +985,25 @@ static bool add_file(const char *canon, const uint8_t *data, uint64_t len, bool 
         ino = alloc_inode();
         if (!ino)
             return false;
-        itab[ino].type = 1;
+        ino_ref(ino)->type = 1;
         mark_inode(ino);
-        if (!dir_insert(&itab[pin], ino, name, nlen))
+        if (!dir_insert(ino_ref(pin), ino, name, nlen))
             return false;
         mark_inode(pin);
     }
     if (!overwrite)
         return true;
-    if (!write_bytes(&itab[ino], data, len))
+    if (!write_bytes(ino_ref(ino), data, len))
         return false;
     mark_inode(ino);
     return true;
 }
 static bool ensure_dir(const char *canon) {
     if (str_eq(canon, "/"))
-        return itab[1].type == 2;
+        return ino_ref(1)->type == 2;
     uint32_t existing = 0;
     if (lookup_path(canon, &existing))
-        return itab[existing].type == 2;
+        return ino_ref(existing)->type == 2;
     char parent[1024], name[256];
     uint32_t nlen = 0, pin = 0;
     if (!split_last(canon, parent, name, &nlen) || !ensure_dir(parent) || !lookup_path(parent, &pin))
@@ -873,9 +1011,9 @@ static bool ensure_dir(const char *canon) {
     uint32_t ino = alloc_inode();
     if (!ino)
         return false;
-    itab[ino].type = 2;
+    ino_ref(ino)->type = 2;
     mark_inode(ino);
-    if (!dir_insert(&itab[pin], ino, name, nlen))
+    if (!dir_insert(ino_ref(pin), ino, name, nlen))
         return false;
     mark_inode(pin);
     return true;
@@ -1018,13 +1156,7 @@ const char *arkfs2_error(void) {
     return last_error;
 }
 uint64_t arkfs2_used_bytes(void) {
-    uint64_t n = 0;
-    if (!mounted)
-        return 0;
-    for (uint32_t i = 1; i < iblock_count * INODES_PER_BLOCK; ++i)
-        if (itab[i].type == 1)
-            n += itab[i].size;
-    return n;
+    return mounted ? used_live : 0;
 }
 uint64_t arkfs2_free_bytes(void) {
     uint64_t n = 0;
@@ -1100,18 +1232,18 @@ bool arkfs2_write(const char *path, const void *data, uint64_t len) {
 bool arkfs2_read(const char *path, void *data, uint64_t cap, uint64_t *out_len) {
     char canon[1024];
     uint32_t ino = 0;
-    if (!mounted || !canonicalize(path, canon) || !lookup_path(canon, &ino) || itab[ino].type != 1)
+    if (!mounted || !canonicalize(path, canon) || !lookup_path(canon, &ino) || ino_ref(ino)->type != 1)
         return false;
     if (out_len)
-        *out_len = itab[ino].size;
-    if (itab[ino].size > cap)
+        *out_len = ino_ref(ino)->size;
+    if (ino_ref(ino)->size > cap)
         return false;
     uint8_t *dst = data;
-    uint64_t left = itab[ino].size;
+    uint64_t left = ino_ref(ino)->size;
     uint32_t logical = 0;
     while (left) {
         uint8_t raw[BLOCK];
-        uint32_t id = map_get(&itab[ino], logical++);
+        uint32_t id = map_get(ino_ref(ino), logical++);
         mem_set(raw, 0, sizeof raw);
         if (id && !read_block(id, raw))
             return false;
@@ -1138,10 +1270,10 @@ bool arkfs2_rename(const char *from, const char *to) {
         !lookup_path(dst_path, &dst_parent))
         return false;
     uint32_t clash = 0;
-    if (dir_walk(&itab[dst_parent], dst_name, dlen, &clash, 0, 0))
+    if (dir_walk(ino_ref(dst_parent), dst_name, dlen, &clash, 0, 0))
         return false;
-    bool ok = dir_remove(&itab[src_parent], src_name, slen) &&
-              dir_insert(&itab[dst_parent], ino, dst_name, dlen);
+    bool ok = dir_remove(ino_ref(src_parent), src_name, slen) &&
+              dir_insert(ino_ref(dst_parent), ino, dst_name, dlen);
     if (ok) {
         mark_inode(src_parent);
         mark_inode(dst_parent);
@@ -1151,12 +1283,12 @@ bool arkfs2_rename(const char *from, const char *to) {
 bool arkfs2_set_readonly(const char *path, bool on) {
     char canon[1024];
     uint32_t ino = 0;
-    if (!mounted || !canonicalize(path, canon) || !lookup_path(canon, &ino) || itab[ino].type != 1)
+    if (!mounted || !canonicalize(path, canon) || !lookup_path(canon, &ino) || ino_ref(ino)->type != 1)
         return false;
     if (on)
-        itab[ino].flags |= 1u;
+        ino_ref(ino)->flags |= 1u;
     else
-        itab[ino].flags &= ~1u;
+        ino_ref(ino)->flags &= ~1u;
     mark_inode(ino);
     return finish(true);
 }
@@ -1165,8 +1297,12 @@ bool arkfs2_meta(uint32_t *bitmap_block, uint32_t *inode_block, uint64_t *gen) {
         return false;
     if (bitmap_block)
         *bitmap_block = bitmap_loc[0];
-    if (inode_block)
-        *inode_block = iblock_loc[0];
+    if (inode_block) {
+        uint32_t loc = 0;
+        if (!index_lookup(0, &loc))
+            return false;
+        *inode_block = loc;
+    }
     if (gen)
         *gen = generation;
     return true;
@@ -1176,7 +1312,7 @@ bool arkfs2_block(const char *path, uint32_t logical, uint32_t *block_id) {
     uint32_t ino = 0;
     if (!mounted || !block_id || !canonicalize(path, canon) || !lookup_path(canon, &ino))
         return false;
-    *block_id = map_get(&itab[ino], logical);
+    *block_id = map_get(ino_ref(ino), logical);
     return true;
 }
 bool arkfs2_lookup(const char *path, uint32_t *ino, uint64_t *size, uint32_t *type) {
@@ -1187,13 +1323,22 @@ bool arkfs2_lookup(const char *path, uint32_t *ino, uint64_t *size, uint32_t *ty
     if (ino)
         *ino = id;
     if (size)
-        *size = itab[id].size;
+        *size = ino_ref(id)->size;
     if (type)
-        *type = itab[id].type;
+        *type = ino_ref(id)->type;
     return true;
 }
 #ifdef ARK_STORAGE_HOST_TEST
 void arkfs2_fail_superblock(int times) {
     fail_superblock = times;
+}
+uint32_t arkfs2_inode_resident(void) {
+    return (uint32_t)sizeof icache;
+}
+uint32_t arkfs2_inode_loads(void) {
+    return inode_loads;
+}
+void arkfs2_reset_inode_loads(void) {
+    inode_loads = 0;
 }
 #endif

@@ -251,6 +251,32 @@ int main(void) {
     check(made == 1500, "1500 files");
     uint8_t one[4];
     check(arkfs2_read("/m1499", one, sizeof one, &n) && n == 1 && one[0] == 'z', "last of 1500");
+    arkfs2_unmount();
+    arkfs2_reset_inode_loads();
+    check(arkfs2_mount(&disk), "remount many");
+    check(arkfs2_inode_loads() <= 1, "mount reads one inode block");
+    check(arkfs2_read("/m0000", one, sizeof one, &n) && n == 1 && one[0] == 'z', "first of 1500");
+    check(arkfs2_inode_loads() < 8, "read does not walk the inode table");
+    check(arkfs2_inode_resident() < 65536u, "inodes are not a resident table");
+    close_disk();
+
+    /* a full disk is the only "空间不足" case */
+    open_disk(1);
+    check(arkfs2_format(&disk), "format 1mb");
+    int stopped = 0;
+    for (int i = 0; i < 400; ++i) {
+        char path[32];
+        snprintf(path, sizeof path, "/f%04d", i);
+        uint64_t before = arkfs2_free_bytes();
+        if (!arkfs2_write(path, "z", 1)) {
+            check(strcmp(arkfs2_error(), "空间不足，未保存") == 0, "out of blocks");
+            check(arkfs2_free_bytes() == before, "free unchanged after failed write");
+            stopped = 1;
+            break;
+        }
+    }
+    check(stopped, "1mb disk fills");
+    check(arkfs2_read("/f0000", one, sizeof one, &n) && n == 1 && one[0] == 'z', "first file remains");
     close_disk();
 
     /* migration */

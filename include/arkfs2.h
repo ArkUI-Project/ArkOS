@@ -32,5 +32,8 @@ bool arkfs2_lookup(const char *path, uint32_t *ino, uint64_t *size, uint32_t *ty
 
 #ifdef ARK_STORAGE_HOST_TEST
 void arkfs2_fail_superblock(int times);
+uint32_t arkfs2_inode_resident(void);
+uint32_t arkfs2_inode_loads(void);
+void arkfs2_reset_inode_loads(void);
 #endif
 #endif
