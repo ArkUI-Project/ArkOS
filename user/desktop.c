@@ -1050,9 +1050,9 @@ static void settings_build(Window *w) {
         settings_info(card, "系统磁盘",
                       storage_mounted() ? "读写 · 系统数据盘" : "未挂载 · 内存会话");
         settings_number(number, storage_used_bytes(), " B");
-        settings_info(card, "已使用", number);
-        settings_number(number, storage_capacity_bytes(), " B（理论上限）");
-        settings_info(card, "容量", number);
+        settings_info(card, "已用", number);
+        settings_info(card, "单文件", "16KB");
+        settings_info(card, "条目", "64");
         for (unsigned i = 0; i < 2; i++) {
             ExtVolumeInfo info = {0};
             bool known = extfs_volume_info(i, &info);

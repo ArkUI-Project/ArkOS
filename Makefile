@@ -115,6 +115,11 @@ build/programs_embed.o: $(USER_PROGRAMS) scripts/pack-user-images.py scripts/bui
 
 include wasm.mk
 
+.PHONY: check-arkfs2
+check-arkfs2: | build
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -DARK_STORAGE_HOST_TEST -Iinclude tests/arkfs2_host.c kernel/arkfs2.c -o build/arkfs2-host-test
+	ASAN_OPTIONS=detect_leaks=0 ./build/arkfs2-host-test
+
 .PHONY: check-registry-host
 check-registry-host: | build
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -DARK_BLOB_HOST_TEST -DARK_REGISTRY_HOST_TEST -Iinclude tests/registry_host_test.c kernel/registry.c kernel/blob.c kernel/sha256.c kernel/alloc.c -o build/registry-host-test
