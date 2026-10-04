@@ -1280,6 +1280,96 @@ bool arkfs2_rename(const char *from, const char *to) {
     }
     return finish(ok);
 }
+static bool dir_has_entry(const Inode *dir) {
+    uint32_t blocks = (uint32_t)(dir->size / BLOCK);
+    for (uint32_t b = 0; b < blocks; ++b) {
+        uint32_t id = map_get(dir, b);
+        uint8_t raw[BLOCK];
+        if (!id || !read_block(id, raw))
+            return true;
+        if (get32(raw) || raw[4])
+            return true;
+    }
+    return false;
+}
+bool arkfs2_remove(const char *path) {
+    char canon[1024], parent[1024], name[256];
+    uint32_t ino = 0, pin = 0, nlen = 0;
+    if (!mounted || !canonicalize(path, canon) || str_eq(canon, "/"))
+        return false;
+    if (!lookup_path(canon, &ino) || !split_last(canon, parent, name, &nlen) || !lookup_path(parent, &pin))
+        return false;
+    Inode *node = ino_ref(ino);
+    if (node->type == 1) {
+        if (node->flags & 1u) {
+            last_error = "当前文件只读";
+            return false;
+        }
+        if (!write_bytes(node, 0, 0))
+            return finish(false);
+    } else if (node->type != 2 || dir_has_entry(node))
+        return false;
+    node = ino_ref(ino);
+    node->type = 0;
+    node->size = 0;
+    mark_inode(ino);
+    bool ok = dir_remove(ino_ref(pin), name, nlen);
+    if (ok)
+        mark_inode(pin);
+    return finish(ok);
+}
+static uint8_t visit_raw[BLOCK];
+static bool visit_dir(uint32_t ino, char *path, uint32_t len, Arkfs2Visit visit, void *user) {
+    Inode node = *ino_ref(ino);
+    if (node.type != 1 && node.type != 2)
+        return true;
+    if (!visit(path, node.type == 2, node.type == 1 ? node.size : 0, user))
+        return false;
+    if (node.type != 2)
+        return true;
+    uint32_t blocks = (uint32_t)(node.size / BLOCK);
+    for (uint32_t b = 0; b < blocks; ++b) {
+        uint32_t id = map_get(&node, b);
+        if (!id || !read_block(id, visit_raw))
+            return false;
+        uint32_t off = 0;
+        while (off + 5 <= BLOCK) {
+            uint32_t eino = get32(visit_raw + off);
+            uint8_t elen = visit_raw[off + 4];
+            if (!eino && !elen)
+                break;
+            if (!elen || off + 5u + elen > BLOCK)
+                return false;
+            char child[256];
+            mem_copy(child, visit_raw + off + 5, elen);
+            child[elen] = 0;
+            off += 5u + elen;
+            uint32_t nlen = len;
+            int slash = !(len == 1 && path[0] == '/');
+            if (nlen + (uint32_t)slash + elen >= 1024)
+                continue;
+            if (slash)
+                path[nlen++] = '/';
+            mem_copy(path + nlen, child, elen);
+            nlen += elen;
+            path[nlen] = 0;
+            if (!visit_dir(eino, path, nlen, visit, user))
+                return false;
+            path[len] = 0;
+            if (!read_block(id, visit_raw))
+                return false;
+        }
+    }
+    return true;
+}
+bool arkfs2_visit(Arkfs2Visit visit, void *user) {
+    char path[1024];
+    if (!mounted || !visit)
+        return false;
+    path[0] = '/';
+    path[1] = 0;
+    return visit_dir(1, path, 1, visit, user);
+}
 bool arkfs2_set_readonly(const char *path, bool on) {
     char canon[1024];
     uint32_t ino = 0;

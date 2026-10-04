@@ -135,7 +135,14 @@ static bool parent_exists(const char *path) {
         --n;
     parent[n] = 0;
     int index = find_canonical(parent);
-    return index >= 0 && vfs_files[index].is_dir;
+    if (index >= 0 && vfs_files[index].is_dir)
+        return true;
+    if (storage_is_v2()) {
+        uint64_t size = 0;
+        uint32_t type = 0;
+        return storage_v2_lookup(parent, &size, &type) && type == 2;
+    }
+    return false;
 }
 
 static int create_entry(const char *name, bool directory) {
@@ -153,17 +160,33 @@ static int create_entry(const char *name, bool directory) {
         return vfs_files[existing].is_dir == directory ? existing : -1;
     if (!parent_exists(path))
         return -1;
-    for (int i = 0; i < VFS_MAX_FILES; ++i) {
-        if (vfs_files[i].used)
-            continue;
-        memset(&vfs_files[i], 0, sizeof(vfs_files[i]));
-        strcopy(vfs_files[i].name, path, sizeof(vfs_files[i].name));
-        vfs_files[i].is_dir = directory;
-        vfs_files[i].used = true;
-        storage_mark_dirty();
-        return i;
+    int slot = -1;
+    for (int i = 0; i < VFS_MAX_FILES; ++i)
+        if (!vfs_files[i].used) {
+            slot = i;
+            break;
+        }
+    if (slot < 0)
+        return -1;
+    if (storage_is_v2()) {
+        uint64_t size = 0;
+        uint32_t type = 0;
+        if (storage_v2_lookup(path, &size, &type)) {
+            if ((type == 2) != directory)
+                return -1;
+        } else if (directory) {
+            if (!storage_v2_mkdir(path))
+                return -1;
+        } else if (!storage_v2_write(path, "", 0))
+            return -1;
     }
-    return -1;
+    memset(&vfs_files[slot], 0, sizeof(vfs_files[slot]));
+    strcopy(vfs_files[slot].name, path, sizeof(vfs_files[slot].name));
+    vfs_files[slot].is_dir = directory;
+    vfs_files[slot].used = true;
+    if (!storage_is_v2())
+        storage_mark_dirty();
+    return slot;
 }
 
 int vfs_create(const char *name) {
@@ -179,6 +202,19 @@ bool vfs_write(int index, const char *text) {
     if (index < 0 || index >= VFS_MAX_FILES || !vfs_files[index].used || vfs_files[index].is_dir ||
         !text)
         return false;
+    if (storage_is_v2()) {
+        size_t length = 0;
+        while (text[length])
+            ++length;
+        if (!storage_v2_write(vfs_files[index].name, text, length))
+            return false;
+        if (length < VFS_FILE_CAP) {
+            memmove(vfs_files[index].data, text, length);
+            vfs_files[index].data[length] = '\0';
+            vfs_files[index].size = length;
+        }
+        return true;
+    }
     size_t length = 0;
     while (length < VFS_FILE_CAP && text[length])
         ++length;
@@ -204,15 +240,20 @@ bool vfs_remove(const char *name) {
     if (extfs_path(path))
         return extfs_remove(path);
     int index = find_canonical(path);
-    if (index < 0)
+    if (index < 0 && !storage_is_v2())
         return false;
-    if (vfs_files[index].is_dir) {
+    if (index >= 0 && vfs_files[index].is_dir) {
         for (int i = 0; i < VFS_MAX_FILES; ++i)
             if (vfs_files[i].used && below(vfs_files[i].name, path))
                 return false;
     }
-    memset(&vfs_files[index], 0, sizeof(vfs_files[index]));
-    storage_mark_dirty();
+    if (storage_is_v2() && !storage_v2_remove(path))
+        return false;
+    if (index >= 0) {
+        memset(&vfs_files[index], 0, sizeof(vfs_files[index]));
+        if (!storage_is_v2())
+            storage_mark_dirty();
+    }
     return true;
 }
 
@@ -246,10 +287,12 @@ bool vfs_rename(const char *oldpath, const char *newpath) {
     }
     int source = find_canonical(old);
     if (source < 0)
-        return false;
+        return storage_is_v2() && storage_v2_rename(old, dest);
     if (!strcmp(old, dest))
         return true;
     if (find_canonical(dest) >= 0 || !parent_exists(dest) || below(dest, old))
+        return false;
+    if (storage_is_v2() && !storage_v2_rename(old, dest))
         return false;
     size_t from = strlen(old), to = strlen(dest);
     /* Validate every child first, so a long descendant cannot cause half a move. */
@@ -266,7 +309,56 @@ bool vfs_rename(const char *oldpath, const char *newpath) {
         memmove(vfs_files[i].name + to, vfs_files[i].name + from, rest + 1);
         memcpy(vfs_files[i].name, dest, to);
     }
-    storage_mark_dirty();
+    if (!storage_is_v2())
+        storage_mark_dirty();
+    return true;
+}
+
+bool vfs_store(const char *path, const void *data, uint64_t len) {
+    char canon[128];
+    if ((!data && len) || !vfs_path_canonical(canon, path) || !strcmp(canon, "/"))
+        return false;
+    if (extfs_path(canon))
+        return false;
+    if (!storage_is_v2()) {
+        if (len >= VFS_FILE_CAP)
+            return false;
+        for (uint64_t i = 0; i < len; ++i)
+            if (!((const unsigned char *)data)[i])
+                return false;
+        int index = vfs_create(canon);
+        if (index < 0)
+            return false;
+        char tmp[VFS_FILE_CAP];
+        memcpy(tmp, data, (size_t)len);
+        tmp[len] = 0;
+        return vfs_write(index, tmp);
+    }
+    if (!parent_exists(canon) || !storage_v2_write(canon, data, len))
+        return false;
+    int existing = find_canonical(canon);
+    if (existing < 0)
+        existing = create_entry(canon, false);
+    if (existing >= 0 && len < VFS_FILE_CAP) {
+        memcpy(vfs_files[existing].data, data, (size_t)len);
+        vfs_files[existing].data[len] = 0;
+        vfs_files[existing].size = (size_t)len;
+    }
+    return true;
+}
+bool vfs_fetch(const char *path, void *data, uint64_t cap, uint64_t *out_len) {
+    char canon[128];
+    if (!vfs_path_canonical(canon, path))
+        return false;
+    if (storage_is_v2())
+        return storage_v2_read(canon, data, cap, out_len);
+    int index = find_canonical(canon);
+    if (index < 0 || vfs_files[index].is_dir || vfs_files[index].size > cap)
+        return false;
+    if (data && vfs_files[index].size)
+        memcpy(data, vfs_files[index].data, vfs_files[index].size);
+    if (out_len)
+        *out_len = vfs_files[index].size;
     return true;
 }
 
@@ -354,3 +446,22 @@ const char *vfs_error(void) {
     const char *disk = storage_error();
     return disk[0] ? disk : "Filesystem operation failed (path, capacity or read-only volume)";
 }
+
+#ifdef ARK_STORAGE_HOST_TEST
+__attribute__((weak)) bool storage_is_v2(void) { return false; }
+__attribute__((weak)) uint64_t storage_free_bytes(void) { return 0; }
+__attribute__((weak)) bool storage_v2_write(const char *path, const void *data, uint64_t len) {
+    (void)path; (void)data; (void)len; return false;
+}
+__attribute__((weak)) bool storage_v2_read(const char *path, void *data, uint64_t cap, uint64_t *out_len) {
+    (void)path; (void)data; (void)cap; (void)out_len; return false;
+}
+__attribute__((weak)) bool storage_v2_mkdir(const char *path) { (void)path; return false; }
+__attribute__((weak)) bool storage_v2_remove(const char *path) { (void)path; return false; }
+__attribute__((weak)) bool storage_v2_rename(const char *from, const char *to) {
+    (void)from; (void)to; return false;
+}
+__attribute__((weak)) bool storage_v2_lookup(const char *path, uint64_t *size, uint32_t *type) {
+    (void)path; (void)size; (void)type; return false;
+}
+#endif

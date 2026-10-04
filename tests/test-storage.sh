@@ -10,6 +10,6 @@ if python3 scripts/create-disk.py "$test_dir/data.img" 2>/dev/null; then
 fi
 cc -std=c11 -O1 -g -Wall -Wextra -Werror -fno-builtin \
     -fsanitize=address,undefined -DARK_STORAGE_HOST_TEST -Iinclude \
-    kernel/storage.c kernel/vfs.c kernel/lib.c tests/storage_test.c \
+    kernel/storage.c kernel/arkfs2.c kernel/vfs.c kernel/lib.c tests/storage_test.c \
     -o "$test_dir/storage-test"
 ASAN_OPTIONS=detect_leaks=0 "$test_dir/storage-test" "$test_dir/data.img"

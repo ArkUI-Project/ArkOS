@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include "ark.h"
 #include "storage.h"
+#include "arkfs2.h"
+#include <string.h>
 
 #define DISK_BYTES (32u * 1024u * 1024u)
 #define BANK0 (8u * 512u)
@@ -75,6 +77,7 @@ int main(int argc, char **argv) {
     FILE *image = fopen(argv[1], "rb");
     assert(image && fread(disk, 1, sizeof(disk), image) == sizeof(disk));
     fclose(image);
+    arkfs2_fail_superblock(1000000);
     vfs_init();
     assert(storage_mounted() && writes > 0);
     assert(storage_capacity_bytes() == 64u * 16383u);
@@ -196,5 +199,54 @@ int main(int argc, char **argv) {
     reboot();
     assert(vfs_find("full.txt") >= 0 && vfs_create("still-full.txt") < 0);
     puts("PASS: maximum file, capacity, deletion and full snapshot round-trip");
+
+    memcpy(disk, before, sizeof(disk));
+    arkfs2_fail_superblock(1);
+    reboot();
+    assert(storage_mounted() && !storage_is_v2());
+    assert(!memcmp(disk, before, 4168u * 512u));
+    expect("copy.txt", "last durable checkpoint");
+    assert(strcmp(storage_status(), "未挂载 · 内存会话") != 0);
+    puts("PASS: failed migration leaves the v1 volume mounted");
+
+    memcpy(disk, before, sizeof(disk));
+    arkfs2_fail_superblock(0);
+    reboot();
+    assert(storage_is_v2());
+    assert(!memcmp(disk, "ARKFS2", 6));
+    assert(!memcmp(disk + 512, before + 512, 4167u * 512u));
+    expect("copy.txt", "last durable checkpoint");
+    uint64_t used = storage_used_bytes(), freeb = storage_free_bytes();
+    assert(used + freeb != (uint64_t)DISK_BYTES);
+    puts("PASS: migration publishes ArkFS2 and keeps both v1 banks");
+
+    memset(disk, 0, sizeof(disk));
+    assert(storage_format_new() && storage_is_v2());
+    assert(!memcmp(disk, "ARKFS2", 6));
+    static unsigned char big[20000], got[20000];
+    memset(big, 0x5a, sizeof(big));
+    big[100] = 0;
+    assert(vfs_store("/wide.bin", big, sizeof(big)));
+    uint64_t nread = 0;
+    assert(vfs_fetch("/wide.bin", got, sizeof(got), &nread));
+    assert(nread == sizeof(big) && !memcmp(got, big, sizeof(big)));
+    assert(vfs_rename("/wide.bin", "/wide2.bin"));
+    assert(vfs_fetch("/wide2.bin", got, sizeof(got), &nread) && nread == sizeof(big));
+    reboot();
+    assert(storage_is_v2());
+    assert(vfs_fetch("/wide2.bin", got, sizeof(got), &nread));
+    assert(nread == sizeof(big) && !memcmp(got, big, sizeof(big)));
+    assert(vfs_remove("/wide2.bin"));
+    reboot();
+    assert(!vfs_fetch("/wide2.bin", got, sizeof(got), &nread));
+    used = storage_used_bytes();
+    freeb = storage_free_bytes();
+    assert(used + freeb != (uint64_t)DISK_BYTES);
+    assert(vfs_store("/ro.txt", "abc", 3));
+    assert(arkfs2_set_readonly("/ro.txt", true));
+    int ro = vfs_find("/ro.txt");
+    assert(ro >= 0 && !vfs_write(ro, "nope"));
+    assert(!strcmp(storage_error(), "当前文件只读"));
+    puts("PASS: new ArkFS2 mounts, and files over 16KB round-trip");
     return 0;
 }
