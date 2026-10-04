@@ -68,6 +68,8 @@ void vfs_init(void);
 int vfs_find(const char *name);
 int vfs_create(const char *name);
 bool vfs_write(int index, const char *text);
+bool vfs_store(const char *path, const void *data, uint64_t len);
+bool vfs_fetch(const char *path, void *data, uint64_t cap, uint64_t *out_len);
 bool vfs_remove(const char *name);
 #define SHELL_LINES 256
 #define SHELL_COLS 256
