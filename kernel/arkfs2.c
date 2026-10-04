@@ -13,7 +13,8 @@
 #define INODE_BYTES 64u
 #define INODES_PER_BLOCK 64u
 #define MAX_BITMAP 4u
-#define MAX_INODE_BLOCKS 16u
+#define MAX_INODE_BLOCKS 1024u
+#define INDEX_SLOTS 1024u
 #define MAX_CHAIN 128u
 #define NAME_MAX 255u
 #define PATH_MAX 1023u
@@ -44,6 +45,9 @@ static uint8_t bitmap_mem[MAX_BITMAP * BLOCK];
 static uint8_t committed_mem[MAX_BITMAP * BLOCK];
 static uint8_t quarantine_mem[MAX_BITMAP * BLOCK];
 static Inode itab[MAX_INODE_BLOCKS * INODES_PER_BLOCK];
+static uint32_t words_cache_block;
+static uint32_t words_cache[1024];
+static uint32_t commit_loc[MAX_INODE_BLOCKS];
 #ifdef ARK_STORAGE_HOST_TEST
 static int fail_superblock;
 #endif
@@ -125,6 +129,8 @@ static bool write_block(uint32_t block, const uint8_t *buf) {
         return false;
     if (reserved_prefix && block < reserved_prefix)
         return false;
+    if (block == words_cache_block)
+        words_cache_block = 0;
     return disk->write(block * 8u, 8, buf);
 }
 static uint32_t alloc_block(void) {
@@ -165,11 +171,17 @@ static void load_words(uint32_t block, uint32_t *words) {
     mem_set(words, 0, 1024u * sizeof(uint32_t));
     if (!block)
         return;
+    if (block == words_cache_block) {
+        mem_copy(words, words_cache, sizeof words_cache);
+        return;
+    }
     uint8_t raw[BLOCK];
     if (!read_block(block, raw))
         return;
     for (unsigned i = 0; i < 1024; ++i)
         words[i] = get32(raw + i * 4);
+    words_cache_block = block;
+    mem_copy(words_cache, words, sizeof words_cache);
 }
 static bool words_empty(const uint32_t *words) {
     for (unsigned i = 0; i < 1024; ++i)
@@ -275,7 +287,7 @@ static uint32_t alloc_inode(void) {
         if (!itab[n].type)
             return n;
     }
-    if (iblock_count >= MAX_INODE_BLOCKS) {
+    if (iblock_count >= MAX_INODE_BLOCKS || iblock_count >= INDEX_SLOTS) {
         last_error = "空间不足，未保存";
         return 0;
     }
@@ -583,7 +595,8 @@ static bool commit_cow(void) {
     for (uint32_t i = 0; i < iblock_count; ++i)
         if (iblock_dirty[i])
             dirty = true;
-    uint32_t new_bm[MAX_BITMAP], new_loc[MAX_INODE_BLOCKS], new_index = index_block;
+    uint32_t new_bm[MAX_BITMAP], new_index = index_block;
+    uint32_t *new_loc = commit_loc;
     for (uint32_t i = 0; i < bitmap_count; ++i) {
         new_bm[i] = alloc_block();
         if (!new_bm[i]) {
@@ -780,6 +793,7 @@ static bool layout(uint32_t prefix) {
     mem_set(bitmap_mem, 0, sizeof bitmap_mem);
     mem_set(committed_mem, 0, sizeof committed_mem);
     mem_set(quarantine_mem, 0, sizeof quarantine_mem);
+    words_cache_block = 0;
     mem_set(itab, 0, sizeof itab);
     mem_set(iblock_dirty, 0, sizeof iblock_dirty);
     total_blocks = disk->sectors / 8u;

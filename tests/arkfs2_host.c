@@ -237,6 +237,22 @@ int main(void) {
     free(huge); free(huge2);
     close_disk();
 
+    /* more files than the old 16-inode-block cap (about 1000) */
+    open_disk(16);
+    check(arkfs2_format(&disk), "format many");
+    int made = 0;
+    for (int i = 0; i < 1500; ++i) {
+        char path[32];
+        snprintf(path, sizeof path, "/m%04d", i);
+        if (!arkfs2_write(path, "z", 1))
+            break;
+        made++;
+    }
+    check(made == 1500, "1500 files");
+    uint8_t one[4];
+    check(arkfs2_read("/m1499", one, sizeof one, &n) && n == 1 && one[0] == 'z', "last of 1500");
+    close_disk();
+
     /* migration */
     open_disk(16);
     write_v1("hello");
