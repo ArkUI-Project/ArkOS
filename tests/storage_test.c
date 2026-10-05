@@ -321,7 +321,7 @@ int main(int argc, char **argv) {
     memset(b, 'b', 255); b[255] = 0;
     memset(c, 'c', 255); c[255] = 0;
     memset(d, 'd', 254); d[254] = 0;
-    char dir1[300], dir2[600], dir3[900], longp[1024], longer[1100];
+    char dir1[300], dir2[600], dir3[900], longp[1200], longer[1200];
     snprintf(dir1, sizeof dir1, "/%s", a);
     snprintf(dir2, sizeof dir2, "%s/%s", dir1, b);
     snprintf(dir3, sizeof dir3, "%s/%s", dir2, c);
