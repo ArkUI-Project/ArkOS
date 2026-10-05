@@ -152,10 +152,8 @@ int64_t installer_request(ArkInstallRequest *q) {
             return -28;
         install_features = q->features & 3u; /* ENCRYPT|COMPRESS */
         install_pass[0] = 0;
-        if (install_features & 1u) {
-            if (!q->can_encrypt && !arkfs2_random_available())
-                return -1;
-            if (!q->passphrase[0] || !arkfs2_random_available())
+        if (install_features & ARKFS2_FEAT_ENCRYPT) {
+            if (!arkfs2_random_available() || !q->passphrase[0])
                 return -1;
             strcopy(install_pass, q->passphrase, sizeof install_pass);
         }

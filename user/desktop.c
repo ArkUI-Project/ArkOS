@@ -1057,6 +1057,8 @@ static void settings_build(Window *w) {
             settings_info(card, "已用", number);
             settings_number(number, storage_free_bytes(), " B");
             settings_info(card, "剩余", number);
+            if (storage_is_encrypted())
+                settings_info(card, "加密", "仅文件内容");
         } else {
             settings_info(card, "系统磁盘",
                           storage_mounted() ? "读写 · 系统数据盘" : "未挂载 · 内存会话");
