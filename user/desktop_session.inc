@@ -632,7 +632,7 @@ static bool session_render(void) {
               session_unlocking ? "正在解锁…"
               : (session_disk_pass[0] ? "••••••••" : "磁盘口令"),
               0xaec7e3);
-        button(x + 28, y + 218, w - 56, session_unlocking ? "正在解锁…" : "解锁磁盘",
+        button(x + 28, y + 218, w - 56, session_unlocking ? "正在解锁…" : "解锁",
                !session_unlocking);
         if (session_disk_msg[0])
             label(x + 28, y + 262, session_disk_msg, 0xffb4a8);

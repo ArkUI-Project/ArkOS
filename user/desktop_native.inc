@@ -640,7 +640,7 @@ static void native_draw_app(int app, Window *w) {
             rr(x + width - 62, ty + 10, 44, 20, 10, accent, can_enc ? (install_encrypt ? 200 : 55) : 30);
             rr(x + width - (install_encrypt && can_enc ? 34 : 56), ty + 12, 16, 16, 8, 0xffffff,
                can_enc ? 230 : 90);
-            clip(x, ty + 44, can_enc ? "仅文件内容加密，元数据保持明文；默认关闭。"
+            clip(x, ty + 44, can_enc ? "开机需要输入口令；忘记口令无法恢复"
                                      : "此设备不支持加密",
                  width, muted);
             ty += 78;
@@ -648,16 +648,16 @@ static void native_draw_app(int app, Window *w) {
             label(x + 14, ty + 11, "压缩", ink);
             rr(x + width - 62, ty + 10, 44, 20, 10, accent, install_compress ? 200 : 55);
             rr(x + width - (install_compress ? 34 : 56), ty + 12, 16, 16, 8, 0xffffff, 230);
-            clip(x, ty + 44, "小窗口 LZ；默认关闭。可与加密同时开启。", width, muted);
+            clip(x, ty + 44, "节省空间，读写会稍慢", width, muted);
             ty += 78;
             if (install_encrypt && can_enc) {
-                label(x, ty, "磁盘口令", ink);
+                label(x, ty, "口令", ink);
                 rr(x + 110, ty - 8, width - 110, 36, 8, accent, install_field == 1 ? 40 : 18);
-                label(x + 122, ty + 2, install_pass[0] ? "••••••••" : "输入口令", muted);
+                label(x + 122, ty + 2, install_pass[0] ? "••••••••" : "", muted);
                 ty += 48;
                 label(x, ty, "再次输入", ink);
                 rr(x + 110, ty - 8, width - 110, 36, 8, accent, install_field == 2 ? 40 : 18);
-                label(x + 122, ty + 2, install_pass2[0] ? "••••••••" : "确认口令", muted);
+                label(x + 122, ty + 2, install_pass2[0] ? "••••••••" : "", muted);
                 ty += 48;
             }
             label(x, ty, "输入 ERASE 确认清盘：", ink);
@@ -726,17 +726,20 @@ static void native_click(int app, int px, int py) {
         if (in(px, py, x + 175, ty, 120, 36))
             native_open(12);
         if (in(px, py, x, ty, 160, 36)) {
-            if (strcmp(install_confirm, "ERASE")) {
-                notice("请先输入 ERASE，确认清空所选磁盘");
+            bool can_start = !strcmp(install_confirm, "ERASE");
+            if (install_encrypt && can_enc)
+                can_start = can_start && install_pass[0] && !strcmp(install_pass, install_pass2);
+            if (install_encrypt && !can_enc) {
+                notice("此设备不支持加密");
                 return;
             }
-            if (install_encrypt && can_enc) {
-                if (!install_pass[0] || strcmp(install_pass, install_pass2)) {
-                    notice("请输入一致的磁盘口令，或关闭加密");
-                    return;
-                }
-            } else if (install_encrypt && !can_enc) {
-                notice("此设备不支持加密");
+            if (!can_start) {
+                if (strcmp(install_confirm, "ERASE"))
+                    notice("请先输入 ERASE，确认清空所选磁盘");
+                else if (install_encrypt && can_enc && !install_pass[0])
+                    notice("口令不能为空");
+                else if (install_encrypt && can_enc)
+                    notice("两次口令不一致");
                 return;
             }
             install_state = install_disks[install_choice];
