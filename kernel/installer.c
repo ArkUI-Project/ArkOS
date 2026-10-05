@@ -227,12 +227,12 @@ int64_t installer_request(ArkInstallRequest *q) {
         }
         if (!okay) {
             state = 4;
-            strcopy(failure, "I/O or partition validation failed; target is incomplete",
+            strcopy(failure, "写入分区失败，目标盘未完成",
                     sizeof failure);
         }
     } else if (q->op == ARK_INSTALL_CANCEL && state == 1) {
         state = 3;
-        strcopy(failure, "Cancelled; target disk is incomplete", sizeof failure);
+        strcopy(failure, "安装已取消，目标盘未完成", sizeof failure);
     } else if (q->op != ARK_INSTALL_STATUS && q->op != ARK_INSTALL_STEP)
         return -22;
     q->state = state;
