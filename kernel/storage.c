@@ -123,6 +123,7 @@ static void bind_ark(void) {
 }
 static bool remember_file(const char *path, int is_dir, uint64_t size, void *user) {
     (void)user;
+    (void)size;
     if (strlen(path) >= sizeof(vfs_files[0].name))
         return true;
     for (int i = 0; i < VFS_MAX_FILES; ++i)
@@ -135,13 +136,6 @@ static bool remember_file(const char *path, int is_dir, uint64_t size, void *use
         vfs_files[i].used = true;
         vfs_files[i].is_dir = is_dir != 0;
         strcopy(vfs_files[i].name, path, sizeof(vfs_files[i].name));
-        if (!is_dir && size < VFS_FILE_CAP) {
-            uint64_t got = 0;
-            if (arkfs2_read(path, vfs_files[i].data, VFS_FILE_CAP - 1u, &got) && got < VFS_FILE_CAP) {
-                vfs_files[i].data[got] = 0;
-                vfs_files[i].size = (size_t)got;
-            }
-        }
         return true;
     }
     return true;
@@ -153,9 +147,9 @@ static bool attach_v2(bool migrated) {
     active_bank = -1;
     last_error = "";
     mount_status = "ArkFS2: persistent block disk";
-    memset(vfs_files, 0, sizeof(vfs_files));
+    memset(vfs_files, 0, (sizeof(VFile) * VFS_MAX_FILES));
     if (!arkfs2_visit(remember_file, 0))
-        memset(vfs_files, 0, sizeof(vfs_files));
+        memset(vfs_files, 0, (sizeof(VFile) * VFS_MAX_FILES));
     serial_write(migrated ? "[storage] migrated ArkFS1 onto ArkFS2\n" : "[storage] ArkFS2 mounted\n");
     return true;
 }
@@ -265,7 +259,7 @@ static bool load_bank(unsigned bank, const BankInfo *info) {
         return false;
     if (crc32(payload, info->length) != info->crc)
         return false;
-    memset(vfs_files, 0, sizeof(vfs_files));
+    memset(vfs_files, 0, (sizeof(VFile) * VFS_MAX_FILES));
     uint32_t offset = 0;
     for (unsigned i = 0; i < info->count; ++i) {
         if (info->length - offset < RECORD_BYTES)
@@ -354,7 +348,7 @@ bool storage_init(void) {
     else if (load_bank(1 - first, &banks[1 - first]))
         chosen = (int)(1 - first);
     if (chosen < 0) {
-        memset(vfs_files, 0, sizeof(vfs_files));
+        memset(vfs_files, 0, (sizeof(VFile) * VFS_MAX_FILES));
         last_error = "Both ArkFS snapshots are invalid; disk left untouched";
         mount_status = "RAM only: ArkFS recovery required";
         serial_write("[storage] Both ArkFS banks invalid; disk untouched; RAM only\n");
@@ -596,5 +590,8 @@ bool storage_v2_rename(const char *from, const char *to) {
 }
 bool storage_v2_lookup(const char *path, uint64_t *size, uint32_t *type) {
     return vol_v2 && arkfs2_lookup(path, 0, size, type);
+}
+bool storage_v2_visit(StorageVisit visit, void *user) {
+    return vol_v2 && visit && arkfs2_visit(visit, user);
 }
 

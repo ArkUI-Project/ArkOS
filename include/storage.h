@@ -14,6 +14,8 @@ bool storage_v2_mkdir(const char *path);
 bool storage_v2_remove(const char *path);
 bool storage_v2_rename(const char *from, const char *to);
 bool storage_v2_lookup(const char *path, uint64_t *size, uint32_t *type);
+typedef bool (*StorageVisit)(const char *path, int is_dir, uint64_t size, void *user);
+bool storage_v2_visit(StorageVisit visit, void *user);
 bool storage_sync(void);
 const char *storage_error(void);
 bool vfs_mkdir(const char *path);

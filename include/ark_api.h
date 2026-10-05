@@ -24,7 +24,7 @@
 #define ARK_SURFACE_MAX_W 3840u
 #define ARK_SURFACE_MAX_H 2160u
 #define ARK_FILE_MAX 16383u
-#define ARK_FILE_SLOTS 128u
+#define ARK_FILE_SLOTS 256u
 
 enum {
     ARK_SYS_EXIT = 0,

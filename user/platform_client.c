@@ -10,8 +10,7 @@ static ArkSystemInfo system_info;
 static ArkStorageInfo disk_info;
 static GpuStats stats;
 static char last_error[128];
-VFile vfs_files[VFS_MAX_FILES];
-static VFile external_files[EXTFS_MAX_ENTRIES];
+VFile vfs_files[ARK_FILE_SLOTS];
 static bool loaded[ARK_FILE_SLOTS];
 static ArkFileInfo metadata[ARK_FILE_SLOTS];
 static void error_copy(const char *s) {
@@ -37,7 +36,7 @@ static bool file_call(ArkFileRequest *r) {
 VFile *vfs_entry(int i) {
     if (i < 0 || i >= (int)ARK_FILE_SLOTS)
         return 0;
-    return i < VFS_MAX_FILES ? &vfs_files[i] : &external_files[i - VFS_MAX_FILES];
+    return &vfs_files[i];
 }
 int vfs_entry_limit(void) {
     return ARK_FILE_SLOTS;
@@ -272,13 +271,12 @@ const GpuStats *gpu_stats(void) {
     return &stats;
 }
 void vfs_init(void) {
-    memset(vfs_files, 0, sizeof(vfs_files));
-    memset(external_files, 0, sizeof(external_files));
+    memset(vfs_files, 0, (sizeof(VFile) * ARK_FILE_SLOTS));
     memset(loaded, 0, sizeof(loaded));
     (void)info_refresh();
     if (!snapshot())
         return;
-    for (int i = 0; i < VFS_MAX_FILES; i++)
+    for (int i = 0; i < (int)ARK_FILE_SLOTS; i++)
         if (vfs_files[i].used && !vfs_files[i].is_dir && vfs_files[i].size < VFS_FILE_CAP)
             (void)vfs_read(i);
 }
@@ -462,23 +460,23 @@ bool extfs_volume_info(unsigned n, ExtVolumeInfo *out) {
 }
 int extfs_find(const char *p) {
     int i = vfs_find(p);
-    return i >= VFS_MAX_FILES ? i - VFS_MAX_FILES : -1;
+    return i >= VFS_EXT_BASE ? i - VFS_EXT_BASE : -1;
 }
 VFile *extfs_entry(int i) {
-    return i >= 0 && i < EXTFS_MAX_ENTRIES ? &external_files[i] : 0;
+    return i >= 0 && i < EXTFS_MAX_ENTRIES ? vfs_entry(VFS_EXT_BASE + i) : 0;
 }
 bool extfs_read(int i) {
-    return vfs_read(i + VFS_MAX_FILES);
+    return vfs_read(i + VFS_EXT_BASE);
 }
 bool extfs_list(const char *p) {
     return vfs_list(p);
 }
 int extfs_create(const char *p, bool directory) {
     int i = create(p, directory);
-    return i >= VFS_MAX_FILES ? i - VFS_MAX_FILES : -1;
+    return i >= VFS_EXT_BASE ? i - VFS_EXT_BASE : -1;
 }
 bool extfs_write(int i, const char *s) {
-    return vfs_write(i + VFS_MAX_FILES, s);
+    return vfs_write(i + VFS_EXT_BASE, s);
 }
 bool extfs_remove(const char *p) {
     return vfs_remove(p);

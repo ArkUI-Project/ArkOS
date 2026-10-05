@@ -22,6 +22,15 @@
 VFile vfs_files[VFS_MAX_FILES];
 extern void storage_mark_dirty(void);
 
+typedef struct {
+    bool used, is_dir;
+    char name[128];
+    size_t size;
+} VfsLite;
+static VfsLite v2_list[VFS_V2_LIST_MAX];
+static unsigned v2_list_count;
+static VFile v2_facade;
+
 /* UTF-8 is kept intact in filenames; malformed and control characters fail. */
 static bool valid_utf8(const char *s, size_t n) {
     size_t i = 0;
@@ -63,10 +72,14 @@ static bool valid_utf8(const char *s, size_t n) {
 }
 
 /* Shared privately with storage.c when validating on-disk names. */
-bool vfs_path_canonical(char out[128], const char *path) {
-    if (!path || !path[0])
+bool vfs_path_canonical_cap(char *out, size_t cap, const char *path) {
+    if (!path || !path[0] || !out || cap < 2)
         return false;
-    strcopy(out, path[0] == '/' ? "/" : "/home/ark", 128);
+    size_t name_max = cap > 128 ? 255 : cap - 1;
+    size_t path_max = cap > 128 ? VFS_PATH_MAX : cap - 1;
+    if (path_max >= cap)
+        path_max = cap - 1;
+    strcopy(out, path[0] == '/' ? "/" : "/home/ark", cap);
     size_t length = strlen(out);
     const char *p = path;
     while (*p) {
@@ -75,7 +88,7 @@ bool vfs_path_canonical(char out[128], const char *path) {
         const char *start = p;
         size_t n = 0;
         while (*p && *p != '/') {
-            if (++n >= 128)
+            if (++n > name_max)
                 return false;
             ++p;
         }
@@ -94,7 +107,7 @@ bool vfs_path_canonical(char out[128], const char *path) {
             continue;
         }
         size_t separator = length > 1 ? 1 : 0;
-        if (length + separator + n >= 128)
+        if (length + separator + n > path_max)
             return false;
         if (separator)
             out[length++] = '/';
@@ -103,6 +116,77 @@ bool vfs_path_canonical(char out[128], const char *path) {
         out[length] = 0;
     }
     return true;
+}
+bool vfs_path_canonical(char out[128], const char *path) {
+    return vfs_path_canonical_cap(out, 128, path);
+}
+
+static int find_canonical(const char *name);
+
+static bool canon_native(char *out, size_t cap, const char *path) {
+    if (storage_is_v2())
+        return vfs_path_canonical_cap(out, cap, path);
+    if (cap < 128)
+        return false;
+    return vfs_path_canonical(out, path);
+}
+
+static int find_v2_list(const char *name) {
+    for (unsigned i = 0; i < v2_list_count; ++i)
+        if (v2_list[i].used && !strcmp(v2_list[i].name, name))
+            return (int)(VFS_MAX_FILES + i);
+    return -1;
+}
+
+static int install_visible(const char *path, bool directory, size_t size) {
+    if (strlen(path) >= 128)
+        return -1;
+    int existing = find_canonical(path);
+    if (existing >= 0) {
+        vfs_files[existing].is_dir = directory;
+        if (!directory && size < VFS_FILE_CAP)
+            vfs_files[existing].size = size;
+        return existing;
+    }
+    int listed = find_v2_list(path);
+    if (listed >= 0) {
+        VfsLite *lite = &v2_list[listed - VFS_MAX_FILES];
+        lite->is_dir = directory;
+        lite->size = size;
+        return listed;
+    }
+    for (int i = 0; i < VFS_MAX_FILES; ++i) {
+        if (vfs_files[i].used)
+            continue;
+        memset(&vfs_files[i], 0, sizeof(vfs_files[i]));
+        strcopy(vfs_files[i].name, path, sizeof(vfs_files[i].name));
+        vfs_files[i].is_dir = directory;
+        vfs_files[i].used = true;
+        vfs_files[i].size = directory ? 0 : size;
+        return i;
+    }
+    if (v2_list_count < VFS_V2_LIST_MAX) {
+        VfsLite *lite = &v2_list[v2_list_count];
+        memset(lite, 0, sizeof(*lite));
+        lite->used = true;
+        lite->is_dir = directory;
+        lite->size = size;
+        strcopy(lite->name, path, sizeof(lite->name));
+        return (int)(VFS_MAX_FILES + v2_list_count++);
+    }
+    for (unsigned i = 0; i < VFS_V2_LIST_MAX; ++i) {
+        if (v2_list[i].used)
+            continue;
+        memset(&v2_list[i], 0, sizeof(v2_list[i]));
+        v2_list[i].used = true;
+        v2_list[i].is_dir = directory;
+        v2_list[i].size = size;
+        strcopy(v2_list[i].name, path, sizeof(v2_list[i].name));
+        if (i >= v2_list_count)
+            v2_list_count = i + 1;
+        return (int)(VFS_MAX_FILES + i);
+    }
+    return -1;
 }
 
 static int find_canonical(const char *name) {
@@ -113,20 +197,33 @@ static int find_canonical(const char *name) {
 }
 
 int vfs_find(const char *name) {
-    char path[128];
-    if (!vfs_path_canonical(path, name))
+    char path[1024];
+    if (!canon_native(path, sizeof path, name))
         return -1;
-    if (extfs_path(path)) {
+    if (strlen(path) < 128 && extfs_path(path)) {
         int slot = extfs_find(path);
-        return slot < 0 ? -1 : VFS_MAX_FILES + slot;
+        return slot < 0 ? -1 : VFS_EXT_BASE + slot;
     }
-    return find_canonical(path);
+    int hit = find_canonical(path);
+    if (hit >= 0)
+        return hit;
+    hit = find_v2_list(path);
+    if (hit >= 0)
+        return hit;
+    if (storage_is_v2()) {
+        uint64_t size = 0;
+        uint32_t type = 0;
+        if (!storage_v2_lookup(path, &size, &type) || (type != 1 && type != 2))
+            return -1;
+        return install_visible(path, type == 2, (size_t)size);
+    }
+    return -1;
 }
 
 static bool parent_exists(const char *path) {
     if (!strcmp(path, "/"))
         return true;
-    char parent[128];
+    char parent[1024];
     strcopy(parent, path, sizeof(parent));
     size_t n = strlen(parent);
     while (n > 1 && parent[n - 1] != '/')
@@ -137,6 +234,8 @@ static bool parent_exists(const char *path) {
     int index = find_canonical(parent);
     if (index >= 0 && vfs_files[index].is_dir)
         return true;
+    if (find_v2_list(parent) >= 0)
+        return true;
     if (storage_is_v2()) {
         uint64_t size = 0;
         uint32_t type = 0;
@@ -146,20 +245,50 @@ static bool parent_exists(const char *path) {
 }
 
 static int create_entry(const char *name, bool directory) {
-    char path[128];
-    if (!vfs_path_canonical(path, name))
+    char path[1024];
+    if (!canon_native(path, sizeof path, name))
         return -1;
-    if (extfs_path(path)) {
+    if (strlen(path) < 128 && extfs_path(path)) {
         int slot = extfs_create(path, directory);
-        return slot < 0 ? -1 : VFS_MAX_FILES + slot;
+        return slot < 0 ? -1 : VFS_EXT_BASE + slot;
     }
     if (!directory && !strcmp(path, "/"))
         return -1;
     int existing = find_canonical(path);
     if (existing >= 0)
         return vfs_files[existing].is_dir == directory ? existing : -1;
+    existing = find_v2_list(path);
+    if (existing >= 0)
+        return v2_list[existing - VFS_MAX_FILES].is_dir == directory ? existing : -1;
     if (!parent_exists(path))
         return -1;
+    if (storage_is_v2()) {
+        uint64_t size = 0;
+        uint32_t type = 0;
+        if (storage_v2_lookup(path, &size, &type)) {
+            if ((type == 2) != directory)
+                return -1;
+            return install_visible(path, directory, (size_t)size);
+        }
+        if (directory) {
+            if (!storage_v2_mkdir(path))
+                return -1;
+        } else if (!storage_v2_write(path, "", 0))
+            return -1;
+        int visible = install_visible(path, directory, 0);
+        if (visible >= 0)
+            return visible;
+        if (strlen(path) >= 128)
+            return -1;
+        VfsLite *lite = &v2_list[VFS_V2_LIST_MAX - 1];
+        memset(lite, 0, sizeof(*lite));
+        lite->used = true;
+        lite->is_dir = directory;
+        strcopy(lite->name, path, sizeof(lite->name));
+        if (v2_list_count < VFS_V2_LIST_MAX)
+            v2_list_count = VFS_V2_LIST_MAX;
+        return VFS_MAX_FILES + VFS_V2_LIST_MAX - 1;
+    }
     int slot = -1;
     for (int i = 0; i < VFS_MAX_FILES; ++i)
         if (!vfs_files[i].used) {
@@ -168,24 +297,11 @@ static int create_entry(const char *name, bool directory) {
         }
     if (slot < 0)
         return -1;
-    if (storage_is_v2()) {
-        uint64_t size = 0;
-        uint32_t type = 0;
-        if (storage_v2_lookup(path, &size, &type)) {
-            if ((type == 2) != directory)
-                return -1;
-        } else if (directory) {
-            if (!storage_v2_mkdir(path))
-                return -1;
-        } else if (!storage_v2_write(path, "", 0))
-            return -1;
-    }
     memset(&vfs_files[slot], 0, sizeof(vfs_files[slot]));
     strcopy(vfs_files[slot].name, path, sizeof(vfs_files[slot].name));
     vfs_files[slot].is_dir = directory;
     vfs_files[slot].used = true;
-    if (!storage_is_v2())
-        storage_mark_dirty();
+    storage_mark_dirty();
     return slot;
 }
 
@@ -193,14 +309,38 @@ int vfs_create(const char *name) {
     return create_entry(name, false);
 }
 bool vfs_mkdir(const char *path) {
-    return create_entry(path, true) >= 0;
+    if (create_entry(path, true) >= 0)
+        return true;
+    if (!storage_is_v2())
+        return false;
+    char canon[1024];
+    uint64_t size = 0;
+    uint32_t type = 0;
+    if (!canon_native(canon, sizeof canon, path)) {
+        (void)storage_v2_mkdir(path);
+        return false;
+    }
+    return storage_v2_lookup(canon, &size, &type) && type == 2;
 }
 
 bool vfs_write(int index, const char *text) {
-    if (index >= VFS_MAX_FILES)
-        return extfs_write(index - VFS_MAX_FILES, text);
-    if (index < 0 || index >= VFS_MAX_FILES || !vfs_files[index].used || vfs_files[index].is_dir ||
-        !text)
+    if (index >= VFS_EXT_BASE)
+        return extfs_write(index - VFS_EXT_BASE, text);
+    if (!text)
+        return false;
+    if (index >= VFS_MAX_FILES && index < VFS_EXT_BASE) {
+        VfsLite *lite = &v2_list[index - VFS_MAX_FILES];
+        if (!lite->used || lite->is_dir || !storage_is_v2())
+            return false;
+        size_t length = 0;
+        while (text[length])
+            ++length;
+        if (!storage_v2_write(lite->name, text, length))
+            return false;
+        lite->size = length;
+        return true;
+    }
+    if (index < 0 || index >= VFS_MAX_FILES || !vfs_files[index].used || vfs_files[index].is_dir)
         return false;
     if (storage_is_v2()) {
         size_t length = 0;
@@ -234,13 +374,14 @@ static bool below(const char *path, const char *directory) {
 }
 
 bool vfs_remove(const char *name) {
-    char path[128];
-    if (!vfs_path_canonical(path, name) || !strcmp(path, "/"))
+    char path[1024];
+    if (!canon_native(path, sizeof path, name) || !strcmp(path, "/"))
         return false;
-    if (extfs_path(path))
+    if (strlen(path) < 128 && extfs_path(path))
         return extfs_remove(path);
     int index = find_canonical(path);
-    if (index < 0 && !storage_is_v2())
+    int listed = find_v2_list(path);
+    if (index < 0 && listed < 0 && !storage_is_v2())
         return false;
     if (index >= 0 && vfs_files[index].is_dir) {
         for (int i = 0; i < VFS_MAX_FILES; ++i)
@@ -254,12 +395,14 @@ bool vfs_remove(const char *name) {
         if (!storage_is_v2())
             storage_mark_dirty();
     }
+    if (listed >= 0)
+        memset(&v2_list[listed - VFS_MAX_FILES], 0, sizeof(v2_list[0]));
     return true;
 }
 
 bool vfs_copy(const char *oldpath, const char *newpath) {
-    char old[128], dest[128];
-    if (!vfs_path_canonical(old, oldpath) || !vfs_path_canonical(dest, newpath) ||
+    char old[1024], dest[1024];
+    if (!canon_native(old, sizeof old, oldpath) || !canon_native(dest, sizeof dest, newpath) ||
         !strcmp(old, dest))
         return false;
     int source = vfs_find(old);
@@ -271,14 +414,14 @@ bool vfs_copy(const char *oldpath, const char *newpath) {
 }
 
 bool vfs_rename(const char *oldpath, const char *newpath) {
-    char old[128], dest[128];
-    if (!vfs_path_canonical(old, oldpath) || !vfs_path_canonical(dest, newpath) ||
+    char old[1024], dest[1024];
+    if (!canon_native(old, sizeof old, oldpath) || !canon_native(dest, sizeof dest, newpath) ||
         !strcmp(old, "/") || !strcmp(dest, "/"))
         return false;
-    if (extfs_path(old) || extfs_path(dest)) {
-        if (extfs_path(old) && extfs_path(dest))
+    if ((strlen(old) < 128 && extfs_path(old)) || (strlen(dest) < 128 && extfs_path(dest))) {
+        if (strlen(old) < 128 && strlen(dest) < 128 && extfs_path(old) && extfs_path(dest))
             return extfs_rename(old, dest);
-        if (extfs_path(old) && !extfs_path_writable(old))
+        if (strlen(old) < 128 && extfs_path(old) && !extfs_path_writable(old))
             return false;
         /* Cross-volume moves use a durable copy before deleting the source. */
         if (vfs_find(dest) >= 0 || !vfs_copy(old, dest) || !vfs_sync())
@@ -286,8 +429,17 @@ bool vfs_rename(const char *oldpath, const char *newpath) {
         return vfs_remove(old);
     }
     int source = find_canonical(old);
-    if (source < 0)
-        return storage_is_v2() && storage_v2_rename(old, dest);
+    if (source < 0) {
+        if (!(storage_is_v2() && storage_v2_rename(old, dest)))
+            return false;
+        int listed = find_v2_list(old);
+        if (listed >= 0 && strlen(dest) < 128) {
+            strcopy(v2_list[listed - VFS_MAX_FILES].name, dest,
+                    sizeof(v2_list[0].name));
+        } else if (listed >= 0)
+            memset(&v2_list[listed - VFS_MAX_FILES], 0, sizeof(v2_list[0]));
+        return true;
+    }
     if (!strcmp(old, dest))
         return true;
     if (find_canonical(dest) >= 0 || !parent_exists(dest) || below(dest, old))
@@ -315,10 +467,17 @@ bool vfs_rename(const char *oldpath, const char *newpath) {
 }
 
 bool vfs_store(const char *path, const void *data, uint64_t len) {
-    char canon[128];
-    if ((!data && len) || !vfs_path_canonical(canon, path) || !strcmp(canon, "/"))
+    char canon[1024];
+    if ((!data && len) || !path)
         return false;
-    if (extfs_path(canon))
+    if (!canon_native(canon, sizeof canon, path)) {
+        if (storage_is_v2())
+            (void)storage_v2_write(path, data, len);
+        return false;
+    }
+    if (!strcmp(canon, "/"))
+        return false;
+    if (strlen(canon) < 128 && extfs_path(canon))
         return false;
     if (!storage_is_v2()) {
         if (len >= VFS_FILE_CAP)
@@ -336,10 +495,8 @@ bool vfs_store(const char *path, const void *data, uint64_t len) {
     }
     if (!parent_exists(canon) || !storage_v2_write(canon, data, len))
         return false;
-    int existing = find_canonical(canon);
-    if (existing < 0)
-        existing = create_entry(canon, false);
-    if (existing >= 0 && len < VFS_FILE_CAP) {
+    int existing = install_visible(canon, false, (size_t)len);
+    if (existing >= 0 && existing < VFS_MAX_FILES && len < VFS_FILE_CAP) {
         memcpy(vfs_files[existing].data, data, (size_t)len);
         vfs_files[existing].data[len] = 0;
         vfs_files[existing].size = (size_t)len;
@@ -347,8 +504,8 @@ bool vfs_store(const char *path, const void *data, uint64_t len) {
     return true;
 }
 bool vfs_fetch(const char *path, void *data, uint64_t cap, uint64_t *out_len) {
-    char canon[128];
-    if (!vfs_path_canonical(canon, path))
+    char canon[1024];
+    if (!canon_native(canon, sizeof canon, path))
         return false;
     if (storage_is_v2())
         return storage_v2_read(canon, data, cap, out_len);
@@ -368,7 +525,7 @@ static void seed_file(const char *name, const char *text) {
 }
 
 void vfs_init(void) {
-    memset(vfs_files, 0, sizeof(vfs_files));
+    memset(vfs_files, 0, (sizeof(VFile) * VFS_MAX_FILES));
     bool mounted = storage_init();
     const char *directories[] = {
         "/", "/home", "/home/ark", "/home/ark/Documents", "/home/ark/Desktop", "/tmp", "/etc"};
@@ -380,8 +537,8 @@ void vfs_init(void) {
                             "若状态显示 ArkFS，文件通过 ATA PIO 写入 arkos-data.img。\n"
                             "使用 sync 或记事本保存可立即落盘；桌面也会定期同步。\n"
                             "无磁盘或磁盘格式不匹配时进入 RAM 模式，重启会丢失更改。\n\n"
-                            "当前容量：64 个文件/目录条目，每个文本文件最多 16383 字节；\n"
-                            "完整路径最多 127 个 UTF-8 字节。支持中文路径及文件内容。\n"
+                            "ArkFS v1：64 个条目，单文件最多 16383 字节，路径最多 127 字节。\n"
+                            "ArkFS v2：容量跟空闲块走，路径最多 1023 字节。支持中文路径。\n"
                             "原生终端提供类 Unix 命令，尚不能运行 Linux ELF 程序。\n");
     seed_file("hello.txt",
               "Hello from ArkOS!\n你好，ArkOS！\nNative kernel, genuine persistent disk I/O.\n");
@@ -405,32 +562,91 @@ void vfs_init(void) {
     extfs_init();
 }
 
+typedef struct {
+    const char *dir;
+    size_t dir_len;
+} ListFill;
+
+static bool list_fill_child(const char *path, int is_dir, uint64_t size, void *user) {
+    ListFill *fill = user;
+    size_t n = fill->dir_len;
+    if (!strcmp(fill->dir, "/")) {
+        if (path[0] != '/' || !path[1])
+            return true;
+        for (const char *p = path + 1; *p; ++p)
+            if (*p == '/')
+                return true;
+    } else {
+        if (strncmp(path, fill->dir, n) || path[n] != '/' || !path[n + 1])
+            return true;
+        for (const char *p = path + n + 1; *p; ++p)
+            if (*p == '/')
+                return true;
+    }
+    if (strlen(path) >= 128)
+        return true;
+    if (v2_list_count >= VFS_V2_LIST_MAX)
+        return true;
+    VfsLite *lite = &v2_list[v2_list_count++];
+    memset(lite, 0, sizeof(*lite));
+    lite->used = true;
+    lite->is_dir = is_dir != 0;
+    lite->size = (size_t)size;
+    strcopy(lite->name, path, sizeof(lite->name));
+    return true;
+}
+
 /* Native ArkFS records and external records retain separate storage/lifetimes. */
 VFile *vfs_entry(int index) {
     if (index < 0)
         return 0;
     if (index < VFS_MAX_FILES)
         return &vfs_files[index];
-    return extfs_entry(index - VFS_MAX_FILES);
+    if (index < VFS_EXT_BASE) {
+        VfsLite *lite = &v2_list[index - VFS_MAX_FILES];
+        memset(&v2_facade, 0, sizeof(v2_facade));
+        if (!lite->used)
+            return &v2_facade;
+        v2_facade.used = true;
+        v2_facade.is_dir = lite->is_dir;
+        v2_facade.size = lite->size;
+        strcopy(v2_facade.name, lite->name, sizeof(v2_facade.name));
+        return &v2_facade;
+    }
+    return extfs_entry(index - VFS_EXT_BASE);
 }
 int vfs_entry_limit(void) {
 #ifdef ARK_STORAGE_HOST_TEST
-    return VFS_MAX_FILES;
+    return VFS_EXT_BASE;
 #else
-    return VFS_MAX_FILES + EXTFS_MAX_ENTRIES;
+    return VFS_EXT_BASE + EXTFS_MAX_ENTRIES;
 #endif
 }
 bool vfs_read(int index) {
-    if (index >= VFS_MAX_FILES)
-        return extfs_read(index - VFS_MAX_FILES);
+    if (index >= VFS_EXT_BASE)
+        return extfs_read(index - VFS_EXT_BASE);
+    if (index >= VFS_MAX_FILES && index < VFS_EXT_BASE) {
+        VfsLite *lite = &v2_list[index - VFS_MAX_FILES];
+        return lite->used && !lite->is_dir;
+    }
     return index >= 0 && vfs_files[index].used && !vfs_files[index].is_dir;
 }
 bool vfs_list(const char *directory) {
-    char path[128];
-    if (!vfs_path_canonical(path, directory))
+    char path[1024];
+    if (!canon_native(path, sizeof path, directory))
         return false;
-    if (extfs_path(path))
+    if (strlen(path) < 128 && extfs_path(path))
         return extfs_list(path);
+    if (storage_is_v2()) {
+        uint64_t size = 0;
+        uint32_t type = 0;
+        if (!storage_v2_lookup(path, &size, &type) || type != 2)
+            return false;
+        memset(v2_list, 0, sizeof(v2_list));
+        v2_list_count = 0;
+        ListFill fill = {path, strlen(path)};
+        return storage_v2_visit(list_fill_child, &fill);
+    }
     int i = find_canonical(path);
     return i >= 0 && vfs_files[i].is_dir;
 }
@@ -463,5 +679,8 @@ __attribute__((weak)) bool storage_v2_rename(const char *from, const char *to) {
 }
 __attribute__((weak)) bool storage_v2_lookup(const char *path, uint64_t *size, uint32_t *type) {
     (void)path; (void)size; (void)type; return false;
+}
+__attribute__((weak)) bool storage_v2_visit(StorageVisit visit, void *user) {
+    (void)visit; (void)user; return false;
 }
 #endif
