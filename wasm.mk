@@ -2,7 +2,11 @@
 WASM_SRC := third_party/wasm3/source
 WASM_NAMES := m3_bind m3_code m3_compile m3_core m3_env m3_exec m3_function m3_info m3_module m3_parse m3_validate m3_deterministic
 WASM_OBJECTS := $(addprefix build/wasm/,$(addsuffix .o,$(WASM_NAMES))) build/wasm/port.o build/wasm/runtime.o
-WASM_CFLAGS := $(USER_CFLAGS) -ffunction-sections -fdata-sections -include runtime/wasm/config.h -I$(WASM_SRC) -Iruntime/wasm -Wno-unused-parameter
+# -Wno-maybe-musttail-local-addr: GCC 13+ reports wasm3's d_m3Op tail-call chain.
+# musttail copies its arguments into the successor frame, so no automatic really
+# escapes. The vendored upstream sources stay untouched; only this pinned toolchain
+# diagnostic is silenced for the interpreter translation units.
+WASM_CFLAGS := $(USER_CFLAGS) -ffunction-sections -fdata-sections -include runtime/wasm/config.h -I$(WASM_SRC) -Iruntime/wasm -Wno-unused-parameter -Wno-maybe-musttail-local-addr
 build/wasm:
 	mkdir -p $@
 build/wasm/%.o: $(WASM_SRC)/%.c runtime/wasm/config.h $(wildcard $(WASM_SRC)/*.h) | build/wasm

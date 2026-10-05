@@ -13,8 +13,10 @@ extern int64_t virtio_gpu_glass(ArkGlassRequest *) __attribute__((weak));
 #include "net.h"
 #include "installer.h"
 #include "permissions.h"
+#include "device.h"
 #include "ark_catalog.h"
 #include "package.h"
+#include "module.h"
 #define EINVAL (-22)
 #define EFAULT (-14)
 #define EPERM (-1)
@@ -334,6 +336,7 @@ static int64_t account_service(uint64_t addr, uint64_t size) {
         permissions_session_reset();
         net_http_cancel();
         http_owner = 0;
+        device_session_reset();
         memset(&drag_transfer, 0, sizeof drag_transfer);
         drag_owner = 0;
         process_set_current_uid(active() ? accounts_current_uid() : ACCOUNTS_UID_NONE);
@@ -611,6 +614,87 @@ static int64_t surface_service(uint64_t addr, uint64_t size) {
     strcopy(q.title, s->title, sizeof q.title);
     return reply(addr, &q, sizeof q, result);
 }
+/* SYS_DEVICE: inventory is public metadata in an active session, every data
+ * path needs the DEVICE capability. Nothing here trusts a caller-supplied flag,
+ * class, name or identity: the node is looked up by index in kernel state. */
+static uint32_t device_index_at(unsigned ordinal) {
+    unsigned seen = 0;
+    for (uint32_t i = 0; i < ARK_DEVICE_MAX; i++)
+        if (device_info(i) && seen++ == ordinal)
+            return i;
+    return UINT32_MAX;
+}
+static int64_t device_service(uint64_t addr, uint64_t size) {
+    ArkDeviceRequest q;
+    static uint8_t staging[ARK_DEV_READ_CAP];
+    if (!get_request(&q, sizeof q, addr, size))
+        return EFAULT;
+    if (!active())
+        return EPERM;
+    int64_t result = 0;
+    q.error[0] = 0;
+    q.count = device_count();
+    uint32_t index = UINT32_MAX;
+    if (q.op == ARK_DEV_ENUMERATE)
+        index = device_index_at(q.index);
+    else if (q.op <= ARK_DEV_CONTROL)
+        index = q.index;
+    else
+        return EINVAL;
+    const ArkDeviceInfo *node = index == UINT32_MAX ? 0 : device_info(index);
+    if (!node)
+        return reply(addr, &q, sizeof q, q.op == ARK_DEV_ENUMERATE ? ENOENT : EINVAL);
+    q.info = *node;
+    q.flags = node->flags;
+    q.capability = node->flags;
+    q.status = node->state;
+    q.generation = (uint32_t)node->generation;
+    device_note(process_current_pid());
+    if (q.op == ARK_DEV_READ) {
+        if (!cap(ARK_CAP_DEVICE))
+            return EPERM;
+        if (node->class_id != ARK_DEV_CLASS_BLOCK)
+            return EINVAL;
+        if (!q.sectors || q.sectors > ARK_DEV_READ_SECTORS ||
+            q.capacity != q.sectors * 512u || q.capacity > ARK_DEV_READ_CAP || q.buffer < PROCESS_USER_BASE)
+            return EINVAL;
+        /* The whole destination is verified before a single sector moves, and
+         * the kernel staging copy is cleared afterwards. */
+        if (!process_user_range(q.buffer, q.capacity, true))
+            return EFAULT;
+        if (!device_read_allowed(process_current_pid(), platform_millis()))
+            return EBUSY;
+        if (!device_block_read(index, q.offset, q.sectors, staging))
+            return reply(addr, &q, sizeof q, -5);
+        if (!process_copy_to_user(q.buffer, staging, q.capacity))
+            result = EFAULT;
+        else
+            q.count = q.sectors;
+        memset(staging, 0, sizeof staging);
+    } else if (q.op == ARK_DEV_CONTROL) {
+        if (q.control == ARK_DEVCTL_REFRESH) {
+            if (!cap(ARK_CAP_DEVICE))
+                return EPERM;
+            device_service_poll();
+            node = device_info(index);
+            if (!node)
+                return EINVAL;
+            q.info = *node;
+            q.flags = node->flags;
+            q.status = node->state;
+            q.generation = (uint32_t)node->generation;
+        } else if (q.control == ARK_DEVCTL_FLUSH) {
+            if (!system_caller())
+                return EPERM;
+            if (!device_block_flush(index))
+                return reply(addr, &q, sizeof q, -5);
+        } else
+            return EINVAL;
+    }
+    if (result)
+        strcopy(q.error, device_error(), sizeof q.error);
+    return reply(addr, &q, sizeof q, result);
+}
 static void drag_finish(unsigned action) {
     if (drag_transfer.source < ARK_MAX_SURFACES) {
         Surface *s = &surfaces[drag_transfer.source];
@@ -868,6 +952,7 @@ void services_permissions_changed(const char *name, uint32_t uid, uint64_t caps)
                 memset(&activities[i], 0, sizeof activities[i]);
 }
 void process_exit_notify(uint32_t pid) {
+    device_forget_pid(pid);
     if (drag_owner == pid) {
         memset(&drag_transfer, 0, sizeof drag_transfer);
         drag_owner = 0;
@@ -900,6 +985,7 @@ void process_service_poll(void) {
     polled = true;
     last = now;
     net_poll();
+    device_service_poll();
 }
 void services_init(const BootInfo *info) {
     display = *info;
@@ -913,6 +999,16 @@ int64_t process_syscall_dispatch(uint64_t nr, uint64_t a, uint64_t b, uint64_t c
     (void)e;
     (void)f;
     process_service_poll();
+    if (nr == ARK_SYS_DEVICE)
+        return device_service(a, b);
+    if (nr == ARK_SYS_DRIVER) {
+        ArkDriverRequest q;
+        if (!get_request(&q, sizeof q, a, b))
+            return EFAULT;
+        /* Like SYS_DEVICE the struct is always copied back, so LIST reports
+         * its total count even when the requested index is past the end. */
+        return reply(a, &q, sizeof q, module_request(&q));
+    }
     if (nr == ARK_SYS_ACTIVITY)
         return activity_service(a, b);
     if (nr == ARK_SYS_DRAG)
@@ -1155,6 +1251,8 @@ int64_t process_syscall_dispatch(uint64_t nr, uint64_t a, uint64_t b, uint64_t c
 }
 
 bool process_events_pending(uint32_t pid) {
+    if (device_pending(pid))
+        return true;
     for (unsigned i = 0; i < ARK_MAX_SURFACES; i++)
         if (surfaces[i].alive && surfaces[i].pid == pid && surfaces[i].head != surfaces[i].tail)
             return true;

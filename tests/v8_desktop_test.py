@@ -18,8 +18,9 @@ try:
  start=len(v.log.read_text());v.type('Preserve draft');v.key('ctrl-w');time.sleep(1.4)
  assert '[permission] Consent requested' not in v.log.read_text()[start:];screen('02-unsaved-close-protection')
  v.key('f4');time.sleep(.4);v.tap(300,418);screen('03-permissions')
- # Notes is row 2, right-hand catalog entry; capture its individual toggles.
- v.tap(855,279);screen('04-notes-permissions')
+ # Notes sits in the left column's pending-requests row; select it so the
+ # right panel shows its individual grant toggles.
+ v.tap(244,254);screen('04-notes-permissions')
  v.tap(1008,518);time.sleep(.3);v.key('f3');v.key('ctrl-i');v.type('zhongguo');v.key('spc');v.wait('[ime] Native Pinyin commit accepted in Notes process');v.key('ctrl-i');v.key('ctrl-s');v.wait('[notes] File saved through private user API');screen('05-native-notes')
  v.terminal();v.command('cat notes.txt');v.wait('Preserve draft中国')
  v.command('echo OpenArgument > argument.txt');v.command('run notes argument.txt');time.sleep(.5);v.key('end');v.type('-edited');v.key('ctrl-s');time.sleep(.3);v.terminal();v.command('cat argument.txt');v.wait('OpenArgument\n-edited');v.command('run notes notes.txt');time.sleep(.3)

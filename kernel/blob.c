@@ -326,7 +326,7 @@ static int64_t blob_access(ArkBlobRequest *q, uint32_t uid, bool kernel) {
     for (Record *r = b->records; r; r = r->next) {
         if (r->uid != uid ||
             (!kernel && (!strncmp(r->name, "@pkg.", 5) || !strncmp(r->name, "@registry.", 10) ||
-                         !strncmp(r->name, "@swap.", 6))))
+                         !strncmp(r->name, "@swap.", 6) || !strncmp(r->name, "@drv.", 5))))
             continue;
         if (q->op == ARK_BLOB_LIST) {
             if (count++ == q->index) {
@@ -454,7 +454,7 @@ int64_t blob_request(ArkBlobRequest *q) {
         return -1;
     if (q->op != ARK_BLOB_LIST &&
         (!strncmp(q->name, "@pkg.", 5) || !strncmp(q->name, "@registry.", 10) ||
-         !strncmp(q->name, "@swap.", 6)))
+         !strncmp(q->name, "@swap.", 6) || !strncmp(q->name, "@drv.", 5)))
         return -1;
     return blob_access(q, uid, false);
 }

@@ -3,7 +3,7 @@ LD := ld
 CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror -ffreestanding -fno-builtin -fno-stack-protector -fno-pie -fno-asynchronous-unwind-tables -m64 -mno-red-zone -mgeneral-regs-only -mcmodel=small -Iinclude
 LDFLAGS := -nostdlib -z noexecstack -z max-page-size=0x1000 -T boot/linker.ld
 C_SOURCES := $(wildcard kernel/*.c)
-OBJECTS := $(patsubst kernel/%.c,build/%.o,$(C_SOURCES)) build/entry.o build/ap.o build/interrupts.o build/user_entry.o build/programs_embed.o
+OBJECTS := $(patsubst kernel/%.c,build/%.o,$(C_SOURCES)) build/entry.o build/ap.o build/interrupts.o build/user_entry.o build/module_asm.o build/drivers_embed.o build/programs_embed.o
 .PHONY: all clean run iso check check-vm check-external
 all: iso disk
 build:
@@ -20,16 +20,24 @@ build/entry.o: boot/entry.S | build
 	$(CC) -m64 -ffreestanding -fno-pie -c $< -o $@
 build/interrupts.o: kernel/interrupts.S | build
 	$(CC) -m64 -ffreestanding -fno-pie -c $< -o $@
+build/module_asm.o: kernel/module_asm.S | build
+	$(CC) -m64 -ffreestanding -fno-pie -c $< -o $@
+# Inbox NIC driver: a real .arco image linked into kernel.elf so every boot —
+# bare ISO, foreign disk, fresh install — has networking before any manifest.
+build/e1000.arco: sdk/driver_e1000.c scripts/arco.py scripts/arco.ld $(wildcard include/*.h) | build
+	python3 scripts/arco.py sdk/driver_e1000.c -o $@ --name e1000 --version 1.0.0
+build/drivers_embed.o: kernel/drivers_embed.S build/e1000.arco | build
+	$(CC) -m64 -ffreestanding -fno-pie -c $< -o $@
 build/kernel.elf: $(OBJECTS) boot/linker.ld
 	$(LD) $(LDFLAGS) $(OBJECTS) $(BEARSSL_OBJECTS) -o $@
 	grub-file --is-x86-multiboot2 $@
 iso: build/arkos-0.13.0.iso
-build/arkos-0.13.0.iso: build/kernel.elf boot/grub.cfg boot/efi-bootstrap.cfg scripts/grub-mkrescue-macos.py
+build/arkos-0.13.0.iso: build/kernel.elf boot/grub.cfg scripts/mkiso.py
 	mkdir -p build/iso/boot/grub
 	python3 -c 'from pathlib import Path; [Path("build/iso/boot",n).unlink(missing_ok=True) for n in ("kernel.elf.gz","kernel.elf.xz")]'
 	cp build/kernel.elf build/iso/boot/kernel.elf
 	cp boot/grub.cfg build/iso/boot/grub/grub.cfg
-	grub-mkrescue -o $@ build/iso -- -volid ARKOS0130
+	python3 scripts/mkiso.py build/iso $@ ARKOS0130
 run: iso disk
 	qemu-system-x86_64 -machine q35 -cpu max -smp 4 -m 512M -cdrom build/arkos-0.13.0.iso -boot d -vga vmware -global vmware-svga.vgamem_mb=64 -serial stdio -netdev user,id=net0 -device e1000,netdev=net0,romfile= -drive file=build/arkos-data.img,format=raw,if=ide,index=0 -device virtio-multitouch-pci -device virtio-tablet-pci
 check:
@@ -71,8 +79,16 @@ include net.mk
 check-security-host: | build
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -DARK_STORAGE_HOST_TEST -Iinclude tests/accounts_test.c kernel/vfs.c -o build/accounts-test
 	ASAN_OPTIONS=detect_leaks=0 ./build/accounts-test
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -DARK_STORAGE_HOST_TEST -DARK_ACCOUNTS_HOST_TEST -Iinclude tests/service_host_test.c kernel/services.c kernel/vfs.c kernel/accounts.c kernel/permissions.c -o build/service-host-test
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -DARK_STORAGE_HOST_TEST -DARK_ACCOUNTS_HOST_TEST -Iinclude tests/service_host_test.c kernel/services.c kernel/vfs.c kernel/accounts.c kernel/permissions.c kernel/device.c -o build/service-host-test
 	ASAN_OPTIONS=detect_leaks=0 ./build/service-host-test
+.PHONY: check-device-host
+check-device-host: | build
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -DARK_DEVICE_HOST_TEST -DARK_PCI_HOST_TEST -Iinclude tests/device_host_test.c kernel/device.c kernel/pci.c kernel/lib.c -o build/device-host-test
+	ASAN_OPTIONS=detect_leaks=0 ./build/device-host-test
+.PHONY: check-module-host
+check-module-host: | build
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -DARK_MODULE_HOST_TEST -DARK_DEVICE_HOST_TEST -DARK_PCI_HOST_TEST -DARK_BLOB_HOST_TEST -Iinclude tests/module_host_test.c kernel/module.c kernel/device.c kernel/pci.c kernel/blob.c kernel/sha256.c kernel/lib.c kernel/alloc.c -o build/module-host-test
+	ASAN_OPTIONS=detect_leaks=0 ./build/module-host-test
 check-protection: iso
 	ARK_SMP_TEST=1 python3 tests/process_test.py
 	python3 tests/process_api_test.py

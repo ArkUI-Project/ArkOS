@@ -36,6 +36,8 @@ The public contract is `include/ark_api.h`; standalone build instructions and a 
 | 41 | Performance | SYSTEM; copied native allocator and CPU accounting |
 | 42 | Anonymous virtual memory | owned reserve/commit/protect/decommit/release/trim and demand paging; see VM.md |
 | 43 | Glass compositor | SYSTEM; fixed native VirtIO/VirGL shaders, checked staging/readback; see Fixed GPU glass below |
+| 44 | Device inventory | public metadata in an active session; DEVICE capability for block reads; see Device model |
+| 45 | Loadable kernel drivers | list/query public; install/remove need SYSTEM + admin session; see DRIVERS.md |
 
 `ArkPresent.flags` uses `ARK_PRESENT_FULL` for the complete display; otherwise
 the checked `damage` rectangle selects the update. `ARK_PRESENT_ANIMATION`
@@ -255,6 +257,18 @@ SURFACE/INPUT=8 由拥有者声明 `ARK_SURFACE_TEXT_INPUT=4` 并在 damage 中�
 应用仅能修改 `/apps/<真实进程名>/`；普通包名称为 `pkg.ID`。内核从 ProcessInfo 与当前 UID 推导命名空间，不能以请求中的声明越权。普通应用只读指定的主题、时区和输入偏好。SYSTEM 可访问当前用户的 `/user/` 和应用配置；`/system/` 写入还要求管理员。个人输入学习不公开给普通应用。所有对象存入 UID 私有 `@registry.` 封套，公开 BLOB 不可读写、列举；封套包含原始键和类型并校验摘要身份。持久写失败返回 -5，不报告 RAM 保存成功。元数据缓存预算 4 MiB。
 
 `sdk/config.h` 提供二进制读写；整数和字符串使用 `ark_registry()`。终端 `reg get/list/delete KEY`、`reg set KEY int|string VALUE` 调用同一服务。
+
+## SYS_DEVICE（44）
+
+`ArkDeviceRequest` 的操作 ENUMERATE=0、QUERY=1、STATS=2、READ=3、CONTROL=4；class 为 PLATFORM=1…PCI=11；bus 为 PLATFORM=0…VIRTUAL=3；flag 为 PRESENT=1、READABLE=2、WRITABLE=4、SYSTEM_VOLUME=8、REMOVABLE=16、MODULE=32；state 为 UNKNOWN=0、OK=1、ERROR=2、ABSENT=3。节点最多 64 个，索引在本次启动内稳定，`index` 是用户态唯一可用的标识。
+
+设备清单、查询与统计只需要活动会话，不需要任何能力；READ 需要 DEVICE 能力。读操作把最多 128 个扇区（`ARK_DEV_READ_CAP` 64 KiB）复制到调用者的缓冲区，整个目标区间在搬运任何扇区之前就已校验，暂存副本用后清零。ArkFS 系统卷永不以此方式可读，也没有类具备写路径。CONTROL 的 REFRESH 需要 DEVICE 能力并重跑驱动计数器，FLUSH 需要 SYSTEM；块刷新还要求节点同时 PRESENT、READABLE、WRITABLE，因此系统卷不能从这里刷新。每个进程每 100 ms 最多 16 次尝试，超出返回 -16；拒绝同样消耗预算。
+
+## SYS_DRIVER（45）
+
+`ArkDriverRequest` 的操作 LIST=0、QUERY=1、INSTALL=2、REMOVE=3；state 为 LOADED=1、DISABLED=2、FAILED=3。LIST/QUERY 只需要活动会话；INSTALL 与 REMOVE 需要 SYSTEM 能力、活动会话，并且当前账户是管理员，三者缺一即 -1。请求失败时结构体仍会回写，`count` 因此始终是已安装驱动的总数，越界索引返回 -2。
+
+INSTALL 接受本地规范路径或 `blob:NAME`，先按整份文件校验受保护清单 @drv.manifest 记录的 SHA-256，再校验 ARCO1 头、镜像 CRC-32 与 SHA-256，最后才映射并调用 `arco_entry`；驱动拒绝 INIT 时不写任何持久状态。REMOVE 调用 DEINIT、把该模块注册的节点置为 ABSENT、清空标志，并删除清单条目与镜像 blob，槽位与映射页随即归还内核池，同名驱动可以重新安装。加载格式、隔离方式与限制见 [DRIVERS.md](DRIVERS.md)。
 
 ## SYS_DRAG（40）
 

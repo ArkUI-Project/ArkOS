@@ -4,12 +4,14 @@
 #include "virtio_input.h"
 #include "spice_mouse.h"
 #include "process.h"
+#include "device.h"
 #define ARK_KERNEL
 #include "package.h"
 #include "accounts.h"
 #include "net.h"
 #include "smp.h"
 #include "microcode.h"
+#include "module.h"
 extern const void *platform_microcode(size_t *);
 extern const uint8_t _binary_build_user_desktop_elf_start[], _binary_build_user_desktop_elf_end[];
 void services_init(const BootInfo *info);
@@ -32,6 +34,13 @@ void kernel_main(uint32_t magic, uint32_t mb) {
         for (;;)
             platform_idle();
     }
+    /* Inventory is built after every driver probed hardware and after the page
+     * pool exists, so drivers can attach counters and loadable objects bind. */
+    devices_init();
+    /* Loadable .arco drivers: window lives at kernel PML4[1] so every process
+     * page-table copy already sees it; verified manifest drives the load. */
+    module_init(process_kernel_cr3());
+    module_boot_load();
     if (!package_system_ready()) {
         serial_write("[fatal] system package integrity failed\n");
         for (;;)

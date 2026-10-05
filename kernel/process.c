@@ -43,6 +43,9 @@ static void vm_performance(ArkPerformanceInfo *);
 extern void process_performance_devices(ArkPerformanceInfo *) __attribute__((weak));
 static uint64_t kernel_cr3;
 static bool initialized;
+uint64_t process_kernel_cr3(void) {
+    return kernel_cr3;
+}
 static uint32_t next_pid = 1;
 #define CPU_LIMIT 8u
 __attribute__((weak)) unsigned platform_current_cpu(void) {

@@ -29,7 +29,7 @@ objects += sorted((ROOT/'build/bearssl').rglob('*.o'))
 tree=OUT/'iso';(tree/'boot/grub').mkdir(parents=True,exist_ok=True);elf=tree/'boot/kernel.elf'
 run([LD,'-nostdlib','--gc-sections','-z','noexecstack','-z','max-page-size=0x1000','-T',ROOT/'boot/linker.ld',*objects,'-o',elf],stdout=log,stderr=log)
 (tree/'boot/grub/grub.cfg').write_text('set timeout=0\ninsmod all_video\nset gfxmode=1024x768x32\nset gfxpayload=keep\nmenuentry "TLS diagnostic" {\n multiboot2 /boot/kernel.elf\n boot\n}\n')
-iso=OUT/'tls-diagnostic.iso';run(['grub-mkrescue','-o',iso,tree],stdout=log,stderr=log);log.close()
+iso=OUT/'tls-diagnostic.iso';run(['python3',str(ROOT/'scripts/mkiso.py'),tree,iso],stdout=log,stderr=log);log.close()
 requests=[];servers=[]
 class Fixture(BaseHTTPRequestHandler):
  def log_message(self,*args):pass

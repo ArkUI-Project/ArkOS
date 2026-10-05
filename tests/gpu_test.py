@@ -18,7 +18,7 @@ elf=iso_tree/'boot/kernel.elf'
 subprocess.run(['ld','-nostdlib','-z','max-page-size=0x1000','-T',str(ROOT/'boot/linker.ld'),*objects,'-o',str(elf)],check=True)
 (iso_tree/'boot/grub/grub.cfg').write_text('set timeout=0\nset default=0\ninsmod all_video\nset gfxmode=1024x768x32\nset gfxpayload=keep\nmenuentry "GPU diagnostic" {\n multiboot2 /boot/kernel.elf\n boot\n}\n')
 iso=OUT/'gpu-diagnostic.iso'
-with (OUT/'build.log').open('w') as log:subprocess.run(['grub-mkrescue','-o',str(iso),str(iso_tree)],stdout=log,stderr=log,check=True)
+with (OUT/'build.log').open('w') as log:subprocess.run(['python3',str(ROOT/'scripts/mkiso.py'),str(iso_tree),str(iso)],stdout=log,stderr=log,check=True)
 results=[]
 for vga,firmware in [('vmware','bios'),('std','bios'),('vmware','uefi')]:
  label=vga+'-'+firmware;serial=OUT/(label+'.log');qlog=(OUT/(label+'-qemu.log')).open('w')

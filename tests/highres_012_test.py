@@ -11,7 +11,7 @@ for width,height,firmware in [(2560,1440,'bios'),(3840,2160,'uefi')]:
  # Exercise the production entry's gfxpayload selection; only the default differs.
  cfg=(ROOT/'boot/grub.cfg').read_text().replace('set default=0','set default='+('2' if width==2560 else '3')).replace('set timeout=1','set timeout=0');(tree/'boot/grub/grub.cfg').write_text(cfg)
  iso=OUT/(name+'.iso')
- with (OUT/(name+'-build.log')).open('w') as log:subprocess.run(['grub-mkrescue','-o',str(iso),str(tree),'--','-volid','ARKOS0120'],check=True,stdout=log,stderr=log)
+ with (OUT/(name+'-build.log')).open('w') as log:subprocess.run(['python3',str(ROOT/'scripts/mkiso.py'),str(tree),str(iso),'ARKOS0120'],check=True,stdout=log,stderr=log)
  os.environ['ARKOS_ISO']=str(iso);os.environ['ARKOS_MEMORY']='1024M';os.environ['ARKOS_GEOMETRY']=name;os.environ['ARKOS_MACHINE']='q35';os.environ['ARKOS_SMP']='4'
  disk=OUT/(name+'.img');fresh_data_disk(disk);v=VM('highres-012-'+name,disk,firmware=firmware,device='virtio-multitouch-pci,virtio-tablet-pci')
  try:

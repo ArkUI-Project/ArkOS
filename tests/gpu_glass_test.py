@@ -27,7 +27,7 @@ objects+=[str(ROOT/'build/programs_embed.o'),*map(str,sorted((ROOT/'build/bearss
 tree=OUT/'iso';(tree/'boot/grub').mkdir(parents=True,exist_ok=True);elf=tree/'boot/kernel.elf'
 run([LD,'-nostdlib','--gc-sections','-z','noexecstack','-z','max-page-size=0x1000','-T',str(ROOT/'boot/linker.ld'),*objects,'-o',str(elf)])
 (tree/'boot/grub/grub.cfg').write_text('set timeout=0\nset default=0\ninsmod all_video\nset gfxmode=1280x800x32\nset gfxpayload=keep\nmenuentry "ArkOS GPU pixels" {\n multiboot2 /boot/kernel.elf\n boot\n}\n')
-iso=OUT/'gpu-glass.iso';run(['grub-mkrescue','-o',str(iso),str(tree)]);log.close()
+iso=OUT/'gpu-glass.iso';run(['python3',str(ROOT/'scripts/mkiso.py'),str(tree),str(iso)]);log.close()
 os.environ.update(ARKOS_MACHINE='q35',ARKOS_SMP='4',ARKOS_ISO=str(iso));results=[]
 for firmware in ['bios','uefi']:
  v=VM('gpu-glass-'+firmware,firmware=firmware,device='virtio-tablet-pci',ready='[glass-probe] Scheduler ready')

@@ -4,6 +4,10 @@
 #include "ark.h"
 #include "virtio_input.h"
 #include "process.h"
+#include "device.h"
+#include "pci.h"
+#include "module.h"
+#include "smp.h"
 
 /* Diagnostics can link platform without the process subsystem. */
 extern InterruptFrame *process_on_interrupt(InterruptFrame *) __attribute__((weak));
@@ -308,6 +312,20 @@ static void init_pic(void) {
     io_wait();
     out8(0x21, 0xff);
     out8(0xa1, 0xff);
+}
+/* Runtime mask control for module-bound PIC lines. irq_attach unmasks after
+ * binding; module removal masks again so a released handler can never run. */
+void platform_irq_mask(unsigned irq) {
+    if (irq < 8)
+        out8(0x21, (uint8_t)(in8(0x21) | (1u << irq)));
+    else if (irq < 16)
+        out8(0xa1, (uint8_t)(in8(0xa1) | (1u << (irq - 8))));
+}
+void platform_irq_unmask(unsigned irq) {
+    if (irq < 8)
+        out8(0x21, (uint8_t)(in8(0x21) & ~(1u << irq)));
+    else if (irq < 16)
+        out8(0xa1, (uint8_t)(in8(0xa1) & ~(1u << (irq - 8))));
 }
 static volatile uint64_t ticks;
 static volatile uint64_t milliseconds;
@@ -917,6 +935,9 @@ InterruptFrame *interrupt_dispatch(InterruptFrame *frame) {
     }
     if (vector == 33 || vector == 44)
         drain_input();
+    /* Module-bound PIC lines run their ISR on the module stack; the driver
+     * acknowledges its device there, then the PIC EOI completes the cycle. */
+    module_irq_dispatch(vector - 32);
     if (vector >= 40)
         out8(0xa0, 0x20);
     out8(0x20, 0x20);
@@ -937,6 +958,56 @@ void platform_init(uint32_t magic, uint32_t mb_addr, BootInfo *info) {
         kernel_panic_display_init(info);
     init_pic();
     init_ps2();
+    device_init();
+    pci_init();
+    {   /* Fixed platform nodes: real topology only, no invented model string. */
+        ArkDeviceInfo node = {0};
+        node.bus = ARK_BUS_PLATFORM;
+        node.flags = ARK_DEV_PRESENT;
+        node.state = ARK_DEV_STATE_OK;
+        node.class_id = ARK_DEV_CLASS_PLATFORM;
+        node.blocks = info->memory_mib;
+        strcopy(node.name, "ArkOS platform", sizeof node.name);
+        strcopy(node.driver, "platform", sizeof node.driver);
+        uint_to_str(info->memory_mib, node.detail);
+        size_t at = strlen(node.detail);
+        strcopy(node.detail + at, " MiB RAM", sizeof node.detail - at);
+        device_register(&node);
+        node.class_id = ARK_DEV_CLASS_SERIAL;
+        node.blocks = 0;
+        node.detail[0] = 0;
+        strcopy(node.name, "COM1 console", sizeof node.name);
+        strcopy(node.driver, "serial8250", sizeof node.driver);
+        device_register(&node);
+        node.class_id = ARK_DEV_CLASS_CPU;
+        node.name[0] = 0;
+        node.detail[0] = 0;
+        uint32_t max = 0x80000000u, a = 0, b, c, d;
+        __asm__ volatile("cpuid" : "+a"(max), "=b"(b), "=c"(c), "=d"(d));
+        if (max >= 0x80000004u) {
+            char brand[52] = {0};
+            for (unsigned leaf = 0; leaf < 3; leaf++) {
+                a = 0x80000002u + leaf;
+                b = c = d = 0;
+                __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
+                uint32_t *out = (uint32_t *)(void *)(brand + leaf * 16);
+                out[0] = b;
+                out[1] = d;
+                out[2] = c;
+                out[3] = a;
+            }
+            for (unsigned i = 0; i < sizeof brand - 1 && brand[i]; i++)
+                if (brand[i] == ' ')
+                    brand[i] = 0;
+            strcopy(node.name, brand[0] ? brand : "x86_64 processor", sizeof node.name);
+        } else
+            strcopy(node.name, "x86_64 processor", sizeof node.name);
+        strcopy(node.driver, "cpuid", sizeof node.driver);
+        node.blocks = platform_online_cpus();
+        uint_to_str(platform_online_cpus(), node.detail);
+        strcopy(node.detail + strlen(node.detail), " online CPU", sizeof node.detail);
+        device_register(&node);
+    }
     const unsigned divisor = 1193182u / 1000u;
     out8(0x43, 0x36);
     out8(0x40, (uint8_t)divisor);

@@ -16,7 +16,7 @@ for name,mode in [('controller',1),('untrusted',0)]:
  run(['ld','-r','-b','binary',name+'.elf','-o',name+'-embed.o'],cwd=OUT);objects.append(str(OUT/(name+'-embed.o')))
 objects.append(str(ROOT/'build/programs_embed.o'))
 
-sources=[ROOT/'tests/process_api_fixture.c']+sorted(p for p in (ROOT/'kernel').glob('*.c')if p.name!='main.c')+[ROOT/'boot/entry.S',ROOT/'boot/ap.S',ROOT/'kernel/interrupts.S',ROOT/'kernel/user_entry.S']
+sources=[ROOT/'tests/process_api_fixture.c']+sorted(p for p in (ROOT/'kernel').glob('*.c')if p.name!='main.c')+[ROOT/'boot/entry.S',ROOT/'boot/ap.S',ROOT/'kernel/interrupts.S',ROOT/'kernel/user_entry.S',ROOT/'kernel/module_asm.S']
 for i,source in enumerate(sources):
  obj=OUT/f'kernel{i}.o';extra=['-Dprocess_syscall_dispatch=services_real_dispatch'] if source.name=='services.c' else []
  run(['gcc',*flags,*extra,'-c',str(source),'-o',str(obj)]);objects.append(str(obj))
@@ -24,7 +24,7 @@ tree=OUT/'iso';(tree/'boot/grub').mkdir(parents=True,exist_ok=True)
 run(['ld','-nostdlib','--gc-sections','-z','noexecstack','-z','max-page-size=0x1000','-T',str(ROOT/'boot/linker.ld'),*objects,*map(str,sorted((ROOT/'build/bearssl').rglob('*.o'))),'-o',str(tree/'boot/kernel.elf')])
 (tree/'boot/grub/grub.cfg').write_text('set timeout=0\nset default=0\ninsmod all_video\nset gfxmode=1280x800x32\nset gfxpayload=keep\nmenuentry "Native service boundary" {\n multiboot2 /boot/kernel.elf\n boot\n}\n')
 iso=OUT/'service-boundary.iso'
-with(OUT/'build.log').open('w')as log:run(['grub-mkrescue','-o',str(iso),str(tree)],stdout=log,stderr=log)
+with(OUT/'build.log').open('w')as log:run(['python3',str(ROOT/'scripts/mkiso.py'),str(tree),str(iso)],stdout=log,stderr=log)
 results=[]
 for firmware in ['bios','uefi']:
  serial=OUT/(firmware+'.log');serial.write_text('');err=(OUT/(firmware+'-qemu.log')).open('w')

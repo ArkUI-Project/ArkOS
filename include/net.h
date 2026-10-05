@@ -25,6 +25,14 @@ typedef enum {
 bool net_init(void);
 /* Nonblocking, bounded packet processing. Call from the kernel service loop. */
 void net_poll(void);
+/* NIC binding for kernel modules (include/ark_driver.h ArkNetOps layout).
+ * net_bind_nic copies the ops struct, records owner (module slot), reads the
+ * MAC into status and runs the deferred interface bring-up (link check and
+ * DHCP when up). Returns 0, or -16 when a NIC is already bound.
+ * net_unbind_nic drops the binding when owner matches; the interface falls
+ * back to "no adapter" until another driver attaches. */
+int net_bind_nic(const void *ops, unsigned owner);
+void net_unbind_nic(unsigned owner);
 const NetStatus *net_status(void);
 void net_format_ipv4(uint32_t address, char output[16]);
 /* One HTTP/1.x GET at a time, http:// and validated https://. A new GET cancels the old one.

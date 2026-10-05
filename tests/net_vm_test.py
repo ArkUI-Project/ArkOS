@@ -44,7 +44,7 @@ tree=OUT/'iso';(tree/'boot/grub').mkdir(parents=True,exist_ok=True);elf=tree/'bo
 subprocess.run(['ld','-nostdlib','-z','max-page-size=0x1000','-T',str(ROOT/'boot/linker.ld'),*objects,'-o',str(elf)],check=True)
 (tree/'boot/grub/grub.cfg').write_text('set timeout=0\nset default=0\ninsmod all_video\nset gfxmode=1024x768x32\nset gfxpayload=keep\nmenuentry "Native network diagnostic" {\n multiboot2 /boot/kernel.elf\n boot\n}\n')
 iso=OUT/'net-diagnostic.iso'
-with (OUT/'build.log').open('w') as log:subprocess.run(['grub-mkrescue','-o',str(iso),str(tree)],stdout=log,stderr=log,check=True,env=env)
+with (OUT/'build.log').open('w') as log:subprocess.run(['python3',str(ROOT/'scripts/mkiso.py'),str(tree),str(iso)],stdout=log,stderr=log,check=True,env=env)
 def check_capture(path):
  data=path.read_bytes();assert data[:4]==b'\xd4\xc3\xb2\xa1', 'pcap little endian format'
  at=24;counts={'arp':0,'ipv4':0,'udp':0,'tcp':0}

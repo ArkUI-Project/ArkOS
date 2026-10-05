@@ -12,13 +12,13 @@ for i in range(8):
  run(['gcc',*flags,f'-DPROBE_MODE={i}','-c',str(ROOT/'tests/process_probe.c'),'-o',str(OUT/f'probe{i}.o')])
  run(['ld','-nostdlib','-z','max-page-size=0x1000','-T',str(ROOT/'user/user.ld'),str(OUT/'start.o'),str(OUT/f'probe{i}.o'),'-o',str(OUT/f'probe{i}.elf')])
  run(['ld','-r','-b','binary',f'probe{i}.elf','-o',f'embed{i}.o'],cwd=OUT);objects.append(str(OUT/f'embed{i}.o'))
-for i,s in enumerate(['tests/process_fixture.c','kernel/process.c','kernel/elf.c','kernel/platform.c','kernel/lib.c','boot/entry.S','kernel/interrupts.S','kernel/user_entry.S']+(['kernel/smp.c','kernel/mmio.c','kernel/microcode.c','boot/ap.S'] if SMP else [])):
+for i,s in enumerate(['tests/process_fixture.c','kernel/process.c','kernel/elf.c','kernel/platform.c','kernel/device.c','kernel/pci.c','kernel/block.c','kernel/ahci.c','kernel/mmio.c','kernel/lib.c','boot/entry.S','kernel/interrupts.S','kernel/user_entry.S']+(['kernel/smp.c','kernel/microcode.c','boot/ap.S'] if SMP else [])):
  o=OUT/f'kernel{i}.o';run(['gcc',*flags,'-c',str(ROOT/s),'-o',str(o)]);objects.append(str(o))
 tree=OUT/'iso';(tree/'boot/grub').mkdir(parents=True,exist_ok=True)
 run(['ld','-nostdlib','-z','noexecstack','-z','max-page-size=0x1000','-T',str(ROOT/'boot/linker.ld'),*objects,'-o',str(tree/'boot/kernel.elf')])
 (tree/'boot/grub/grub.cfg').write_text('set timeout=0\nset default=0\ninsmod all_video\nset gfxmode=1024x768x32\nset gfxpayload=keep\nmenuentry "Protection test" {\n multiboot2 /boot/kernel.elf\n boot\n}\n')
 iso=OUT/'protection.iso'
-with (OUT/'build.log').open('w')as log:run(['grub-mkrescue','-o',str(iso),str(tree)],stdout=log,stderr=log)
+with (OUT/'build.log').open('w')as log:run(['python3',str(ROOT/'scripts/mkiso.py'),str(tree),str(iso)],stdout=log,stderr=log)
 results=[]
 for firmware in ['bios','uefi']:
  serial=OUT/(firmware+'.log');serial.write_text('');err=(OUT/(firmware+'-qemu.log')).open('w')

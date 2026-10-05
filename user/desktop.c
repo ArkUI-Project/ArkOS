@@ -10,6 +10,7 @@
 #include "ribbon.h"
 #include "launcher_art.h"
 #include "ark_api.h"
+#define ARK_DRV_PAGE_MAX 8u
 #include "arkui_icons.h"
 #include "ark_catalog.h"
 #include "package.h"
@@ -1098,7 +1099,41 @@ static void settings_build(Window *w) {
             settings_text(card, "菜单栏使用所选时区。", true);
             settings_button(card, "打开日历", 604, false);
         } else if (settings_subpage == 43 || settings_subpage == 46 || settings_subpage == 47) {
-            (void)card;
+            /* Loadable kernel drivers. Listing needs only an active session;
+             * installing and removing need SYSTEM plus an admin account, so
+             * this page reports state and points at the dev command. */
+            static ArkDriverInfo drivers[ARK_DRV_PAGE_MAX];
+            static char names[ARK_DRV_PAGE_MAX][32];
+            unsigned count = 0;
+            for (unsigned i = 0; i < ARK_DRV_PAGE_MAX; i++) {
+                ArkDriverRequest q = {0};
+                q.op = ARK_DRV_LIST;
+                q.index = i;
+                if (ark_driver(&q) < 0)
+                    break;
+                drivers[count] = q.info;
+                strcopy(names[count], q.info.name, sizeof names[0]);
+                count++;
+            }
+            for (unsigned i = 0; i < count; i++) {
+                char value[96];
+                strcopy(value, drivers[i].state == ARK_DRV_STATE_LOADED ? "已加载" :
+                                drivers[i].state == ARK_DRV_STATE_DISABLED ? "已停用" : "失败",
+                        sizeof value);
+                if (drivers[i].detail[0]) {
+                    size_t at = strlen(value);
+                    strcopy(value + at, " · ", sizeof value - at);
+                    strcopy(value + strlen(value), drivers[i].detail,
+                            sizeof value - strlen(value));
+                }
+                settings_info(card, names[i], value);
+            }
+            if (!count)
+                settings_text(card, "尚未安装可加载驱动。", false);
+            settings_text(card, "已安装驱动由内核清单校验后加载；安装或移除需要管理员账户，"
+                                "请在终端执行 dev install /dev remove。", true);
+            settings_text(card, "驱动在 Ring0 执行，只能来自 ARK_SYS_DRIVER 校验通过的 .arco 映像。",
+                          true);
         } else if (settings_subpage == 44) {
             arkui_navigation(&settings_ui, card, "存储空间", ARKUI_SYMBOL_FOLDER, 103);
             arkui_navigation(&settings_ui, card, "应用权限", ARKUI_SYMBOL_LOCK, 106);

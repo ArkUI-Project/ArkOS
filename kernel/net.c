@@ -3,7 +3,7 @@
  * Wire rules: RFC 826, 791, 768, 2131/2132, 1035, 9293 and 9112.
  */
 #include "net.h"
-#include "e1000.h"
+#include "ark_driver.h" /* ArkNetOps: NIC drivers bind through net_bind_nic */
 #include "tls.h"
 static bool https, https_closing;
 
@@ -31,6 +31,12 @@ typedef struct {
 } Neighbor;
 static Neighbor neighbors[8];
 static unsigned neighbor_next;
+/* Bound NIC driver ops (module code inside the kernel module window) and the
+ * module slot that owns them, so removal can unbind before the image drops
+ * out of service. nic_bound gates every dereference. */
+static ArkNetOps nic;
+static int nic_owner = -1;
+static bool nic_bound;
 static uint32_t arp_pending;
 static uint64_t arp_sent;
 static unsigned dhcp_phase, dhcp_attempt;
@@ -155,7 +161,7 @@ static bool ethernet_send(const uint8_t *destination, unsigned type, const uint8
     memcpy(tx_frame + 6, status.mac, 6);
     put16(tx_frame + 12, (uint16_t)type);
     memcpy(tx_frame + 14, payload, n);
-    if (!e1000_send(tx_frame, n + 14))
+    if (!nic_bound || !nic.send(tx_frame, (uint32_t)(n + 14)))
         return false;
     status.tx_packets++;
     status.tx_bytes += n + 14;
@@ -405,7 +411,7 @@ static void dhcp_receive(uint32_t source, const uint8_t *p, size_t n) {
     lease_renew = now + (uint64_t)t1 * 100;
     lease_rebind = now + (uint64_t)t2 * 100;
     lease_expire = now + (uint64_t)lease * 100;
-    set_message("IPv4 configured; native e1000 network ready");
+    set_message("IPv4 configured; network ready");
     char ip[16];
     net_format_ipv4(address, ip);
     serial_write("[net] DHCP ready ip=");
@@ -1147,17 +1153,46 @@ bool net_init(void) {
     tcp_open = false;
     dhcp_phase = 0;
     link_check = 0;
-    status.present = e1000_init(status.mac);
-    if (!status.present) {
-        set_message("No supported Intel 82540EM e1000 adapter");
-        return false;
-    }
-    status.link = e1000_link();
+    /* The NIC arrives through a loadable driver (.arco module): module_boot_load
+     * runs after net_init, so the interface comes up in net_bind_nic. */
+    set_message("waiting for a network driver");
+    return true;
+}
+int net_bind_nic(const void *ops, unsigned owner) {
+    if (!ops)
+        return -22;
+    const ArkNetOps *table = (const ArkNetOps *)ops;
+    if (!table->send || !table->link || !table->receive || !table->read_mac)
+        return -22;
+    if (nic_bound)
+        return -16;
+    nic = *table;
+    nic_owner = (int)owner;
+    nic_bound = true;
+    nic.read_mac(status.mac);
+    status.present = true;
+    status.link = nic.link() != 0;
     if (status.link)
         dhcp_start();
     else
-        set_message("e1000 detected; network link is down");
-    return true;
+        set_message("network adapter present; link is down");
+    return 0;
+}
+void net_unbind_nic(unsigned owner) {
+    if (!nic_bound || nic_owner != (int)owner)
+        return;
+    memset(&nic, 0, sizeof nic);
+    nic_owner = -1;
+    nic_bound = false;
+    status.present = false;
+    status.link = false;
+    status.configured = false;
+    status.ipv4 = status.mask = status.gateway = status.dns = 0;
+    dhcp_phase = 0;
+    if (tcp_open)
+        http_fail("network driver removed");
+    tcp_open = false;
+    set_message("network driver removed");
 }
 void net_poll(void) {
     uint64_t now = platform_ticks();
@@ -1172,7 +1207,7 @@ void net_poll(void) {
         return;
     if (now >= link_check) {
         link_check = now + 50;
-        bool link = e1000_link();
+        bool link = nic_bound && nic.link();
         if (link != status.link) {
             status.link = link;
             if (link)
@@ -1189,8 +1224,8 @@ void net_poll(void) {
     }
     if (!status.link)
         return;
-    for (unsigned budget = 0; budget < 32; budget++) {
-        size_t n = e1000_receive(rx_frame, sizeof rx_frame);
+    for (unsigned budget = 0; budget < 32 && nic_bound; budget++) {
+        size_t n = nic.receive(rx_frame, sizeof rx_frame);
         if (!n)
             break;
         status.rx_packets++;
