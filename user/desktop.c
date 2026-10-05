@@ -2928,6 +2928,7 @@ int main(void) {
     windows[4] = (Window){(sw - 500) / 2, 83, 500, 560, 0, 0, 0, 0, false, false};
     windows[5] = (Window){(sw - 660) / 2, 110, 660, 540, 0, 0, 0, 0, false, false};
     windows[6] = (Window){200, 100, 880, 560, 0, 0, 0, 0, false, false};
+    windows[12].h = 720;
     windows[16].h = 620;
     windows[10] = (Window){(sw - 1040) / 2, 58, 1040, 642, 0, 0, 0, 0, false, false};
     for (int i = 0; i < APPS; i++) {

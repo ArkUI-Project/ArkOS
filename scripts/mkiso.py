@@ -9,7 +9,7 @@ BIOS+UEFI El Torito layout from the locally installed GRUB modules:
         all i386-pc modules staged for runtime insmod.
   UEFI: monolithic BOOTX64.EFI (grub-mkimage x86_64-efi) placed in a
         deterministic FAT16 image written directly here.
-  ISO : xorrisofs with two boot catalog entries.
+  ISO : xorrisofs with two boot catalog entries plus hybrid MBR/GPT.
 
 Stdlib only; every external tool must already be installed.
 """
@@ -252,11 +252,16 @@ def build(stage, out, volid):
 
     out.parent.mkdir(parents=True, exist_ok=True)
     out.unlink(missing_ok=True)
+    # Hybrid MBR + GPT so USB/disk installs see EFI PART at LBA1 (installer finish).
+    hybrid_mbr = bios_dir / "boot_hybrid.img"
+    assert hybrid_mbr.is_file(), f"missing {hybrid_mbr}"
     run("xorrisofs", "-o", out, "-volid", volid, "-r", "-J",
         "-b", "boot/grub/i386-pc/eltorito.img",
         "-no-emul-boot", "-boot-load-size", "4", "-boot-info-table",
         "-eltorito-alt-boot",
         "-e", "boot/grub/efi.img", "-no-emul-boot",
+        "-isohybrid-mbr", hybrid_mbr,
+        "-isohybrid-gpt-basdat",
         stage)
     print(f"{out} ({out.stat().st_size} bytes)")
 

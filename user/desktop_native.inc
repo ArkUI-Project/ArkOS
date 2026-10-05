@@ -31,6 +31,25 @@ static char install_confirm[8];
 static bool install_encrypt, install_compress;
 static unsigned install_field; /* 0=ERASE, 1=pass, 2=pass2 */
 static char install_pass[64], install_pass2[64];
+/* Content Y of 「开始安装」; keep draw/click/Enter in sync. */
+static int install_start_ty(int content_y, bool can_enc) {
+    int ty = content_y + 208;
+    ty += 78; /* encrypt */
+    ty += 78; /* compress */
+    if (install_encrypt && can_enc)
+        ty += 96; /* passphrase rows */
+    ty += 52; /* ERASE */
+    return ty;
+}
+static void install_fit_window(void) {
+    Window *w = app_window(12);
+    int need = install_encrypt ? 720 : 620;
+    if (w->h < need) {
+        w->h = need;
+        if (w->y + w->h > sh - 104)
+            w->y = max(45, sh - 104 - w->h);
+    }
+}
 static ArkActivityRequest external_activity;
 static uint64_t activity_refresh;
 static int native_island_anchor(void) {
@@ -191,6 +210,7 @@ static void native_open(int app) {
         install_pass[0] = install_pass2[0] = 0;
         install_encrypt = install_compress = false;
         install_field = 0;
+        install_fit_window();
         for (unsigned i = 0; i < 2; i++) {
             install_disks[i] = (ArkInstallRequest){0};
             install_disks[i].disk = i;
@@ -584,8 +604,12 @@ static bool native_key(int k) {
                 install_field = (install_field + 1) % 3;
             else
                 install_field = 0;
-        } else if (k == KEY_ENTER)
-            native_click(12, windows[12].x + 35, windows[12].y + 520);
+        } else if (k == KEY_ENTER) {
+            Window *iw = app_window(12);
+            bool can_enc = install_disks[install_choice].can_encrypt != 0;
+            int cy = iw->y + 77;
+            native_click(12, iw->x + 35, install_start_ty(cy, can_enc) + 10);
+        }
         else
             return false;
         dirty = true;
@@ -663,7 +687,7 @@ static void native_draw_app(int app, Window *w) {
             label(x, ty, "输入 ERASE 确认清盘：", ink);
             rr(x + 230, ty - 8, 140, 36, 8, accent, install_field == 0 ? 40 : 18);
             label(x + 245, ty + 2, install_confirm, ink);
-            ty += 52;
+            ty = install_start_ty(y, can_enc);
             bool ready = !strcmp(install_confirm, "ERASE");
             if (install_encrypt && can_enc)
                 ready = ready && install_pass[0] && !strcmp(install_pass, install_pass2);
@@ -706,8 +730,10 @@ static void native_click(int app, int px, int py) {
             if (in(px, py, x, y + 70 + (int)i * 52, width, 44))
                 install_choice = i;
         int ty = y + 208;
-        if (in(px, py, x, ty, width, 40) && can_enc)
+        if (in(px, py, x, ty, width, 40) && can_enc) {
             install_encrypt = !install_encrypt;
+            install_fit_window();
+        }
         ty += 78;
         if (in(px, py, x, ty, width, 40))
             install_compress = !install_compress;
@@ -722,7 +748,7 @@ static void native_click(int app, int px, int py) {
         }
         if (in(px, py, x + 230, ty - 8, 140, 36))
             install_field = 0;
-        ty += 52;
+        ty = install_start_ty(y, can_enc);
         if (in(px, py, x + 175, ty, 120, 36))
             native_open(12);
         if (in(px, py, x, ty, 160, 36)) {

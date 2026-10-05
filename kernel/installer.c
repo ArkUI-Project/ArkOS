@@ -57,19 +57,51 @@ static bool source(void) {
 }
 static bool finish(void) {
     BlockDevice *d = block_device(target);
-    if (!block_read(d, 1, 1, header) || strncmp((char *)header, "EFI PART", 8))
-        return false;
-    unsigned h = rd(header + 12), n = rd(header + 80), bytes = rd(header + 84);
-    uint64_t table = rd64(header + 72);
-    if (h != 92 || bytes != 128 || n < 4 || n > 256 || table < 2 || table > 128)
-        return false;
-    uint32_t saved = rd(header + 16);
-    wr(header + 16, 0);
-    if (crc(header, h) != saved)
-        return false;
-    unsigned table_n = (n * 128 + 511) / 512;
-    if (!block_read(d, table, table_n, entries) || crc(entries, n * 128) != rd(header + 88))
-        return false;
+    unsigned h, n, bytes, table_n;
+    uint64_t table;
+    bool have_gpt = block_read(d, 1, 1, header) && !strncmp((char *)header, "EFI PART", 8);
+    if (have_gpt) {
+        h = rd(header + 12);
+        n = rd(header + 80);
+        bytes = rd(header + 84);
+        table = rd64(header + 72);
+        if (h != 92 || bytes != 128 || n < 4 || n > 256 || table < 2 || table > 128)
+            return false;
+        uint32_t saved = rd(header + 16);
+        wr(header + 16, 0);
+        if (crc(header, h) != saved)
+            return false;
+        table_n = (n * 128 + 511) / 512;
+        if (!block_read(d, table, table_n, entries) || crc(entries, n * 128) != rd(header + 88))
+            return false;
+    } else {
+        /* mkiso.py ISOs are plain El Torito without hybrid GPT; synthesize one. */
+        n = 128;
+        bytes = 128;
+        h = 92;
+        table = 2;
+        table_n = (n * 128 + 511) / 512;
+        memset(entries, 0, n * 128);
+        memset(header, 0, 512);
+        memcpy(header, "EFI PART", 8);
+        header[10] = 1; /* revision 1.0 */
+        wr(header + 12, h);
+        wr64(header + 24, 1);
+        wr64(header + 40, 34);
+        wr64(header + 72, table);
+        wr(header + 80, n);
+        wr(header + 84, bytes);
+        /* Stable disk GUID so remounts stay recognizable. */
+        const uint8_t disk_guid[16] = {0x41, 0x52, 0x4b, 0x4f, 0x53, 0x47, 0x50, 0x54,
+                                       0x44, 0x49, 0x53, 0x4b, 0x30, 0x30, 0x30, 0x31};
+        memcpy(header + 56, disk_guid, 16);
+        memset(mbr, 0, 512);
+        mbr[446 + 4] = 0xee;
+        wr(mbr + 446 + 8, 1);
+        wr(mbr + 446 + 12, d->sectors > 0xffffffffu ? 0xffffffffu : (uint32_t)(d->sectors - 1));
+        mbr[510] = 0x55;
+        mbr[511] = 0xaa;
+    }
     unsigned slot = 0;
     for (; slot < n; slot++) {
         bool empty = true;
