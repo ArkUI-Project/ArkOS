@@ -92,7 +92,10 @@ vm = VM("arco-boot-" + firmware, disk=str(good), firmware=firmware, device=INPUT
 try:
     sign_in(vm)
     log = vm.log.read_text()
-    assert "[storage] ArkFS mounted" in log, log[-2000:]
+    # ArkFS2 is the baseline: the volume is either a fresh v2 image or a
+    # migrated v1 one, and the v1 mount banner is no longer printed.
+    assert ("[storage] ArkFS2 mounted" in log or
+            "[storage] migrated ArkFS1 onto ArkFS2" in log), log[-2000:]
     assert "[module] loaded demo" in log, log[-2000:]
     assert "[drv] demo module online" in log, log[-2000:]
     # The inbox NIC driver is linked into kernel.elf, so it loads even though
