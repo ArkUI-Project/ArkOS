@@ -3,7 +3,12 @@
  * (1023 data slots and one next-block slot). Directory entries are
  * inode + name-length + name and never cross a block. */
 #include "arkfs2.h"
+#include "arkfs2_seal.h"
 #include <stddef.h>
+
+#ifndef ARK_STORAGE_HOST_TEST
+void serial_write(const char *s);
+#endif
 
 #define SECTOR 512u
 #define BLOCK 4096u
@@ -40,6 +45,9 @@ static uint32_t total_blocks, journal_block, bitmap_count, index_block, iblock_c
 static uint32_t bitmap_loc[MAX_BITMAP];
 static uint64_t generation;
 static uint64_t used_live;
+static Arkfs2SealState seal_state;
+static Arkfs2CryptoHeader crypto_hdr;
+static bool crypto_present, crypto_corrupt;
 static uint8_t bitmap_mem[MAX_BITMAP * BLOCK];
 static uint8_t committed_mem[MAX_BITMAP * BLOCK];
 static uint8_t quarantine_mem[MAX_BITMAP * BLOCK];
@@ -610,16 +618,45 @@ static bool lookup_path(const char *canon, uint32_t *ino) {
         return false;
     return dir_walk(ino_ref(pin), name, nlen, ino, 0, 0);
 }
+static uint32_t data_chunk(void) {
+    return (seal_state.features & (ARKFS2_FEAT_ENCRYPT | ARKFS2_FEAT_COMPRESS)) ? ARKFS2_PLAIN_MAX
+                                                                                : BLOCK;
+}
+static bool data_unlocked(void) {
+    if (!(seal_state.features & ARKFS2_FEAT_ENCRYPT))
+        return true;
+    return seal_state.unlocked;
+}
 static bool write_bytes(Inode *ino, const uint8_t *data, uint64_t len) {
-    uint32_t new_blocks = len ? (uint32_t)((len + BLOCK - 1) / BLOCK) : 0;
-    uint32_t old_blocks = ino->size ? (uint32_t)((ino->size + BLOCK - 1) / BLOCK) : 0;
+    if (ino->type == 1 && !data_unlocked()) {
+        last_error = "磁盘已加密";
+        return false;
+    }
+    uint32_t chunk = ino->type == 1 ? data_chunk() : BLOCK;
+    uint32_t new_blocks = len ? (uint32_t)((len + chunk - 1) / chunk) : 0;
+    uint32_t old_blocks = ino->size ? (uint32_t)((ino->size + chunk - 1) / chunk) : 0;
     for (uint32_t i = 0; i < new_blocks; ++i) {
         uint8_t raw[BLOCK];
         mem_set(raw, 0, sizeof raw);
-        uint64_t off = (uint64_t)i * BLOCK;
-        uint32_t n = (uint32_t)((len - off) > BLOCK ? BLOCK : (len - off));
-        if (n)
-            mem_copy(raw, data + off, n);
+        uint64_t off = (uint64_t)i * chunk;
+        uint32_t n = (uint32_t)((len - off) > chunk ? chunk : (len - off));
+        if (ino->type == 1 && (seal_state.features & (ARKFS2_FEAT_ENCRYPT | ARKFS2_FEAT_COMPRESS))) {
+            uint8_t plain[ARKFS2_PLAIN_MAX];
+            mem_set(plain, 0, sizeof plain);
+            if (n && data)
+                mem_copy(plain, (const uint8_t *)data + off, n);
+            if ((seal_state.features & ARKFS2_FEAT_ENCRYPT) && !arkfs2_random_available()) {
+                last_error = "无法加密写入，未保存";
+                return false;
+            }
+            if (!arkfs2_seal_block(&seal_state, i, plain, n, raw)) {
+                last_error = "空间不足，未保存";
+                return false;
+            }
+        } else {
+            if (n && data)
+                mem_copy(raw, (const uint8_t *)data + off, n);
+        }
         uint32_t neu = alloc_block();
         uint32_t old = 0;
         if (!neu || !write_block(neu, raw) || !map_set(ino, i, neu, &old))
@@ -763,6 +800,13 @@ static void fill_super(uint8_t *sec, uint64_t gen, const uint32_t *bm, uint32_t 
     put64(sec + 68, used_live);
     for (uint32_t i = 0; i < MAX_BITMAP; ++i)
         put32(sec + 52 + i * 4, i < bitmap_count ? bm[i] : 0);
+    put32(sec + 76, seal_state.features);
+    if (seal_state.features & ARKFS2_FEAT_ENCRYPT) {
+        put32(sec + 80, crypto_hdr.kdf_iters);
+        mem_copy(sec + 84, crypto_hdr.salt, ARKFS2_SALT_LEN);
+        mem_copy(sec + 100, crypto_hdr.wrap_nonce, ARKFS2_NONCE_LEN);
+        mem_copy(sec + 112, crypto_hdr.wrapped, ARKFS2_KEY_LEN + ARKFS2_TAG_LEN);
+    }
     put32(sec + 508, crc32(sec, 508));
 }
 static void fill_commit(uint8_t *sec, uint64_t gen, const uint32_t *bm, uint32_t index, uint32_t inodes) {
@@ -885,6 +929,30 @@ static bool load_tree(const uint8_t *sec) {
     }
     icache_clear();
     used_live = get64(sec + 68);
+    seal_state.features = get32(sec + 76);
+    crypto_present = (seal_state.features & (ARKFS2_FEAT_ENCRYPT | ARKFS2_FEAT_COMPRESS)) != 0;
+    seal_state.unlocked = !(seal_state.features & ARKFS2_FEAT_ENCRYPT);
+    crypto_corrupt = false;
+    mem_set(seal_state.volume_key, 0, sizeof seal_state.volume_key);
+    if (seal_state.features & ARKFS2_FEAT_ENCRYPT) {
+        crypto_hdr.features = seal_state.features;
+        crypto_hdr.kdf_iters = get32(sec + 80);
+        if (!crypto_hdr.kdf_iters)
+            crypto_hdr.kdf_iters = ARKFS2_KDF_ITERS_DEFAULT;
+        if (crypto_hdr.kdf_iters > ARKFS2_KDF_ITERS_MAX) {
+            crypto_corrupt = true;
+            last_error = "磁盘加密信息已损坏，无法解锁";
+            /* Mount metadata only; unlock card shows the message above (serial has detail). */
+#ifndef ARK_STORAGE_HOST_TEST
+            serial_write("[arkfs2] kdf_iters exceeds max; crypto header rejected\n");
+#endif
+        } else {
+            crypto_corrupt = false;
+            mem_copy(crypto_hdr.salt, sec + 84, ARKFS2_SALT_LEN);
+            mem_copy(crypto_hdr.wrap_nonce, sec + 100, ARKFS2_NONCE_LEN);
+            mem_copy(crypto_hdr.wrapped, sec + 112, ARKFS2_KEY_LEN + ARKFS2_TAG_LEN);
+        }
+    }
     {
         IBlock *root = hold_iblock(0);
         if (!root || root->ent[1].type != 2)
@@ -1114,18 +1182,103 @@ static bool import_v1(void) {
     return true;
 }
 
-bool arkfs2_format(Arkfs2Disk *volume) {
+static bool format_with(Arkfs2Disk *volume, const Arkfs2FormatOptions *opt) {
     disk = volume;
     last_error = "";
     mounted = false;
+    mem_set(&seal_state, 0, sizeof seal_state);
+    mem_set(&crypto_hdr, 0, sizeof crypto_hdr);
+    crypto_present = false;
+    crypto_corrupt = false;
+    if (opt) {
+        seal_state.features = opt->features & (ARKFS2_FEAT_ENCRYPT | ARKFS2_FEAT_COMPRESS);
+        if (seal_state.features & ARKFS2_FEAT_ENCRYPT) {
+            if (!opt->passphrase || !opt->passphrase[0]) {
+                last_error = "口令错误";
+                return false;
+            }
+            crypto_hdr.features = seal_state.features;
+            crypto_hdr.kdf_iters = opt->kdf_iters ? opt->kdf_iters : ARKFS2_KDF_ITERS_DEFAULT;
+            if (!crypto_hdr.kdf_iters || crypto_hdr.kdf_iters > ARKFS2_KDF_ITERS_MAX) {
+                last_error = "名称无效";
+                return false;
+            }
+            if (!arkfs2_random_available() || !arkfs2_random(crypto_hdr.salt, ARKFS2_SALT_LEN)) {
+                last_error = "无法加密写入，未保存";
+                return false;
+            }
+            uint8_t pass_key[ARKFS2_KEY_LEN], vol_key[ARKFS2_KEY_LEN];
+            size_t plen = 0;
+            while (opt->passphrase[plen])
+                ++plen;
+            arkfs2_kdf(opt->passphrase, plen, crypto_hdr.salt, crypto_hdr.kdf_iters, pass_key);
+            if (!arkfs2_random(vol_key, ARKFS2_KEY_LEN) || !arkfs2_wrap_key(pass_key, vol_key, &crypto_hdr)) {
+                mem_set(pass_key, 0, sizeof pass_key);
+                mem_set(vol_key, 0, sizeof vol_key);
+                last_error = "无法加密写入，未保存";
+                return false;
+            }
+            mem_copy(seal_state.volume_key, vol_key, ARKFS2_KEY_LEN);
+            seal_state.unlocked = true;
+            mem_set(pass_key, 0, sizeof pass_key);
+            mem_set(vol_key, 0, sizeof vol_key);
+            crypto_present = true;
+        } else if (seal_state.features & ARKFS2_FEAT_COMPRESS) {
+            crypto_present = true;
+            seal_state.unlocked = true;
+        }
+    }
     if (!layout(0) || !publish_first()) {
         building = false;
         mounted = false;
+        mem_set(&seal_state, 0, sizeof seal_state);
         if (!last_error[0])
             last_error = "空间不足，未保存";
         return false;
     }
     return true;
+}
+bool arkfs2_format(Arkfs2Disk *volume) {
+    Arkfs2FormatOptions opt = {0};
+    return format_with(volume, &opt);
+}
+bool arkfs2_format_ex(Arkfs2Disk *volume, const Arkfs2FormatOptions *opt) {
+    Arkfs2FormatOptions zero = {0};
+    return format_with(volume, opt ? opt : &zero);
+}
+bool arkfs2_needs_unlock(void) {
+    return mounted && (seal_state.features & ARKFS2_FEAT_ENCRYPT) && !seal_state.unlocked;
+}
+bool arkfs2_unlock(const char *passphrase) {
+    if (!(seal_state.features & ARKFS2_FEAT_ENCRYPT))
+        return true;
+    if (crypto_corrupt) {
+        last_error = "磁盘加密信息已损坏，无法解锁";
+        return false;
+    }
+    if (!passphrase) {
+        last_error = "口令错误";
+        return false;
+    }
+    size_t plen = 0;
+    while (passphrase[plen])
+        ++plen;
+    uint8_t pass_key[ARKFS2_KEY_LEN], vol_key[ARKFS2_KEY_LEN];
+    arkfs2_kdf(passphrase, plen, crypto_hdr.salt, crypto_hdr.kdf_iters, pass_key);
+    if (!arkfs2_unwrap_key(pass_key, &crypto_hdr, vol_key)) {
+        mem_set(pass_key, 0, sizeof pass_key);
+        last_error = "口令错误";
+        return false;
+    }
+    mem_copy(seal_state.volume_key, vol_key, ARKFS2_KEY_LEN);
+    seal_state.unlocked = true;
+    mem_set(pass_key, 0, sizeof pass_key);
+    mem_set(vol_key, 0, sizeof vol_key);
+    last_error = "";
+    return true;
+}
+uint32_t arkfs2_features(void) {
+    return seal_state.features;
 }
 bool arkfs2_mount(Arkfs2Disk *volume) {
     disk = volume;
@@ -1210,6 +1363,15 @@ bool arkfs2_card(char *out, uint32_t cap) {
         }
     }
     out[pos] = 0;
+    if (seal_state.features & ARKFS2_FEAT_ENCRYPT) {
+        const char *enc = "加密 · 仅文件内容";
+        uint32_t i = 0;
+        if (pos && pos + 1 < cap)
+            out[pos++] = '\n';
+        while (enc[i] && pos + 1 < cap)
+            out[pos++] = enc[i++];
+    }
+    out[pos < cap ? pos : cap - 1] = 0;
     return true;
 }
 bool arkfs2_mkdir(const char *path) {
@@ -1238,19 +1400,35 @@ bool arkfs2_read(const char *path, void *data, uint64_t cap, uint64_t *out_len) 
         *out_len = ino_ref(ino)->size;
     if (ino_ref(ino)->size > cap)
         return false;
+    if (!data_unlocked()) {
+        last_error = "磁盘已加密";
+        return false;
+    }
     uint8_t *dst = data;
     uint64_t left = ino_ref(ino)->size;
     uint32_t logical = 0;
+    uint32_t chunk = data_chunk();
     while (left) {
         uint8_t raw[BLOCK];
-        uint32_t id = map_get(ino_ref(ino), logical++);
+        uint32_t id = map_get(ino_ref(ino), logical);
         mem_set(raw, 0, sizeof raw);
         if (id && !read_block(id, raw))
             return false;
-        uint32_t n = left > BLOCK ? BLOCK : (uint32_t)left;
-        mem_copy(dst, raw, n);
+        uint32_t n = left > chunk ? chunk : (uint32_t)left;
+        if (seal_state.features & (ARKFS2_FEAT_ENCRYPT | ARKFS2_FEAT_COMPRESS)) {
+            uint8_t plain[ARKFS2_PLAIN_MAX];
+            uint32_t got = 0;
+            if (!arkfs2_unseal_block(&seal_state, logical, raw, plain, sizeof plain, &got) || got < n) {
+                last_error = "文件已损坏，未打开";
+                return false;
+            }
+            mem_copy(dst, plain, n);
+        } else {
+            mem_copy(dst, raw, n);
+        }
         dst += n;
         left -= n;
+        ++logical;
     }
     return true;
 }

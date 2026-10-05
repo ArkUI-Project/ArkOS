@@ -28,7 +28,7 @@ jobs:
       - name: Build x86 boot media
         run: make -j4
       - name: Run host checks
-        run: make check check-security-host check-package-host check-v7-host check-v8-host check-wasm-host
+        run: make check check-arkfs2 check-arkfs2-seal check-security-host check-package-host check-v7-host check-v8-host check-wasm-host
       - name: Check independent disk fixtures and runtime
         run: make check-runtime
       - name: Check native mouse input in BIOS and UEFI
