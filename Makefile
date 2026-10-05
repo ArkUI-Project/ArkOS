@@ -10,6 +10,8 @@ build:
 	mkdir -p build
 build/%.o: kernel/%.c $(wildcard include/*.h) | build
 	$(CC) $(CFLAGS) -c $< -o $@
+build/arkfs2_seal.o: kernel/arkfs2_seal.c $(wildcard include/*.h) | build
+	$(CC) $(CFLAGS) -Ithird_party/bearssl/inc -c $< -o $@
 build/process.o: kernel/process_vm.inc
 build/virtio_gpu.o: kernel/glass_shaders.inc $(wildcard third_party/virgl-protocol/*.h)
 kernel/glass_shaders.inc: scripts/build-glass-shaders.py
@@ -116,9 +118,14 @@ build/programs_embed.o: $(USER_PROGRAMS) scripts/pack-user-images.py scripts/bui
 include wasm.mk
 
 .PHONY: check-arkfs2
+ARKFS2_SEAL_HOST = third_party/bearssl/src/aead/gcm.c third_party/bearssl/src/hash/ghash_ctmul64.c third_party/bearssl/src/symcipher/aes_ct.c third_party/bearssl/src/symcipher/aes_ct_ctr.c third_party/bearssl/src/symcipher/aes_ct_enc.c
 check-arkfs2: | build
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -DARK_STORAGE_HOST_TEST -Iinclude tests/arkfs2_host.c kernel/arkfs2.c -o build/arkfs2-host-test
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -DARK_STORAGE_HOST_TEST -Iinclude -Ithird_party/bearssl/inc -Ithird_party/bearssl/src -DBR_AES_X86NI=0 -DBR_SSE2=0 tests/arkfs2_host.c kernel/arkfs2.c kernel/arkfs2_lz.c kernel/arkfs2_seal.c kernel/sha256.c $(ARKFS2_SEAL_HOST) -o build/arkfs2-host-test
 	ASAN_OPTIONS=detect_leaks=0 ./build/arkfs2-host-test
+.PHONY: check-arkfs2-seal
+check-arkfs2-seal: | build
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -DARK_STORAGE_HOST_TEST -Iinclude -Ithird_party/bearssl/inc -Ithird_party/bearssl/src -DBR_AES_X86NI=0 -DBR_SSE2=0 tests/arkfs2_seal_host.c kernel/arkfs2_seal.c kernel/arkfs2_lz.c kernel/sha256.c $(ARKFS2_SEAL_HOST) -o build/arkfs2-seal-host-test
+	ASAN_OPTIONS=detect_leaks=0 ./build/arkfs2-seal-host-test
 
 .PHONY: check-registry-host
 check-registry-host: | build

@@ -14,6 +14,14 @@ typedef struct Arkfs2Disk {
 } Arkfs2Disk;
 
 bool arkfs2_format(Arkfs2Disk *disk);
+typedef struct {
+    uint32_t features; /* ARKFS2_FEAT_ENCRYPT / ARKFS2_FEAT_COMPRESS; 0 = plain */
+    const char *passphrase; /* required when ENCRYPT set; ignored otherwise */
+} Arkfs2FormatOptions;
+bool arkfs2_format_ex(Arkfs2Disk *disk, const Arkfs2FormatOptions *opt);
+bool arkfs2_needs_unlock(void);
+bool arkfs2_unlock(const char *passphrase);
+uint32_t arkfs2_features(void);
 bool arkfs2_mount(Arkfs2Disk *disk);
 bool arkfs2_migrate_v1(Arkfs2Disk *disk);
 void arkfs2_unmount(void);
