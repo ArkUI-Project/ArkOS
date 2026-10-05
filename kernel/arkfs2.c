@@ -641,6 +641,10 @@ static bool write_bytes(Inode *ino, const uint8_t *data, uint64_t len) {
             mem_set(plain, 0, sizeof plain);
             if (n && data)
                 mem_copy(plain, (const uint8_t *)data + off, n);
+            if ((seal_state.features & ARKFS2_FEAT_ENCRYPT) && !arkfs2_random_available()) {
+                last_error = "无法取得安全随机数";
+                return false;
+            }
             if (!arkfs2_seal_block(&seal_state, i, plain, n, raw)) {
                 last_error = "空间不足，未保存";
                 return false;
@@ -930,6 +934,8 @@ static bool load_tree(const uint8_t *sec) {
         crypto_hdr.kdf_iters = get32(sec + 80);
         if (!crypto_hdr.kdf_iters)
             crypto_hdr.kdf_iters = ARKFS2_KDF_ITERS_DEFAULT;
+        if (crypto_hdr.kdf_iters > ARKFS2_KDF_ITERS_MAX)
+            return false;
         mem_copy(crypto_hdr.salt, sec + 84, ARKFS2_SALT_LEN);
         mem_copy(crypto_hdr.wrap_nonce, sec + 100, ARKFS2_NONCE_LEN);
         mem_copy(crypto_hdr.wrapped, sec + 112, ARKFS2_KEY_LEN + ARKFS2_TAG_LEN);
@@ -1178,9 +1184,13 @@ static bool format_with(Arkfs2Disk *volume, const Arkfs2FormatOptions *opt) {
                 return false;
             }
             crypto_hdr.features = seal_state.features;
-            crypto_hdr.kdf_iters = ARKFS2_KDF_ITERS_DEFAULT;
-            if (!arkfs2_random(crypto_hdr.salt, ARKFS2_SALT_LEN)) {
-                last_error = "空间不足，未保存";
+            crypto_hdr.kdf_iters = opt->kdf_iters ? opt->kdf_iters : ARKFS2_KDF_ITERS_DEFAULT;
+            if (!crypto_hdr.kdf_iters || crypto_hdr.kdf_iters > ARKFS2_KDF_ITERS_MAX) {
+                last_error = "名称无效";
+                return false;
+            }
+            if (!arkfs2_random_available() || !arkfs2_random(crypto_hdr.salt, ARKFS2_SALT_LEN)) {
+                last_error = "无法取得安全随机数";
                 return false;
             }
             uint8_t pass_key[ARKFS2_KEY_LEN], vol_key[ARKFS2_KEY_LEN];
@@ -1191,7 +1201,7 @@ static bool format_with(Arkfs2Disk *volume, const Arkfs2FormatOptions *opt) {
             if (!arkfs2_random(vol_key, ARKFS2_KEY_LEN) || !arkfs2_wrap_key(pass_key, vol_key, &crypto_hdr)) {
                 mem_set(pass_key, 0, sizeof pass_key);
                 mem_set(vol_key, 0, sizeof vol_key);
-                last_error = "空间不足，未保存";
+                last_error = "无法取得安全随机数";
                 return false;
             }
             mem_copy(seal_state.volume_key, vol_key, ARKFS2_KEY_LEN);

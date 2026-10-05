@@ -2,6 +2,7 @@
 #define ARKFS2_H
 #include <stdbool.h>
 #include <stdint.h>
+#include "arkfs2_seal.h"
 
 /* Original ArkFS v2. Block numbers are 32-bit. The journal is 4 blocks.
  * Bitmap and inode blocks are copied to new blocks, then a commit sector is
@@ -16,6 +17,7 @@ typedef struct Arkfs2Disk {
 bool arkfs2_format(Arkfs2Disk *disk);
 typedef struct {
     uint32_t features; /* ARKFS2_FEAT_ENCRYPT / ARKFS2_FEAT_COMPRESS; 0 = plain */
+    uint32_t kdf_iters; /* 0 = default; must be <= ARKFS2_KDF_ITERS_MAX when set */
     const char *passphrase; /* required when ENCRYPT set; ignored otherwise */
 } Arkfs2FormatOptions;
 bool arkfs2_format_ex(Arkfs2Disk *disk, const Arkfs2FormatOptions *opt);

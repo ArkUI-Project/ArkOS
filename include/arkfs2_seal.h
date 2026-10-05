@@ -12,6 +12,7 @@ enum {
     ARKFS2_SALT_LEN = 16,
     ARKFS2_KEY_LEN = 16,
     ARKFS2_KDF_ITERS_DEFAULT = 100000u,
+    ARKFS2_KDF_ITERS_MAX = 500000u,
     /* flags + 2 lens + nonce + tag; logical payload per sealed block. */
     ARKFS2_SEAL_OVERHEAD = 5 + ARKFS2_NONCE_LEN + ARKFS2_TAG_LEN,
     ARKFS2_PLAIN_MAX = 4096u - ARKFS2_SEAL_OVERHEAD
@@ -50,6 +51,7 @@ bool arkfs2_unseal_block(const Arkfs2SealState *st, uint32_t logical_index, cons
                          uint8_t *plain, uint32_t plain_cap, uint32_t *plain_len);
 
 bool arkfs2_random(void *buf, size_t n);
+bool arkfs2_random_available(void);
 
 #ifdef ARK_STORAGE_HOST_TEST
 void arkfs2_set_random_hook(bool (*fn)(void *buf, size_t n));

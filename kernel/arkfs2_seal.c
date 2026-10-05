@@ -24,6 +24,19 @@ bool arkfs2_random(void *buf, size_t n) {
 #endif
 }
 
+bool arkfs2_random_available(void) {
+#ifdef ARK_STORAGE_HOST_TEST
+    return random_hook != 0;
+#else
+    uint32_t a = 1, b, c, d;
+    __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
+    if (!(c & (1u << 30)))
+        return false;
+    uint8_t probe[1];
+    return platform_secure_random(probe, 1);
+#endif
+}
+
 static void mem_set(void *d, int v, size_t n) {
     uint8_t *p = d;
     for (size_t i = 0; i < n; ++i)
