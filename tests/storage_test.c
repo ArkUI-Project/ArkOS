@@ -265,14 +265,26 @@ int main(int argc, char **argv) {
         snprintf(path, sizeof path, "/many/f-%02d.txt", i);
         assert(vfs_store(path, "x", 1));
     }
-    uint64_t free_before = storage_free_bytes();
-    uint64_t used_before = storage_used_bytes();
-    assert(vfs_store("/many/f-65.txt", "x", 1));
     for (int i = 66; i < 70; ++i) {
         char path[64];
         snprintf(path, sizeof path, "/many/f-%02d.txt", i);
         assert(vfs_store(path, "x", 1));
     }
+    uint64_t free_before_65 = storage_free_bytes();
+    uint64_t used_before_65 = storage_used_bytes();
+    assert(vfs_store("/many/f-65.txt", "x", 1));
+    uint64_t free_with = storage_free_bytes();
+    assert(free_with < free_before_65);
+    assert(vfs_rename("/many/f-65.txt", "/many/renamed-65.txt"));
+    assert(vfs_find("/many/renamed-65.txt") >= 0);
+    assert(storage_free_bytes() == free_with);
+    assert(vfs_remove("/many/renamed-65.txt"));
+    assert(vfs_find("/many/renamed-65.txt") < 0);
+    assert(storage_used_bytes() == used_before_65);
+    assert(storage_free_bytes() == free_before_65);
+    assert(storage_sync());
+    reboot();
+    assert(storage_is_v2());
     assert(vfs_list("/many"));
     int visible = 0;
     for (int i = 0; i < vfs_entry_limit(); ++i) {
@@ -280,16 +292,17 @@ int main(int argc, char **argv) {
         if (f && f->used && !strncmp(f->name, "/many/", 6))
             ++visible;
     }
-    assert(visible >= 70);
-    uint64_t free_with = storage_free_bytes();
-    assert(free_with < free_before);
-    assert(vfs_rename("/many/f-65.txt", "/many/renamed-65.txt"));
-    assert(vfs_find("/many/renamed-65.txt") >= 0);
-    assert(storage_free_bytes() == free_with);
-    assert(vfs_remove("/many/renamed-65.txt"));
+    assert(visible >= 69);
+    for (int i = 66; i < 70; ++i) {
+        char path[64];
+        char buf[8];
+        uint64_t got = 0;
+        snprintf(path, sizeof path, "/many/f-%02d.txt", i);
+        assert(vfs_fetch(path, buf, sizeof buf, &got));
+        assert(got == 1 && buf[0] == 'x');
+    }
     assert(vfs_find("/many/renamed-65.txt") < 0);
-    assert(storage_used_bytes() == used_before + 4); /* f-66..f-69 remain */
-    assert(storage_free_bytes() > free_with);
+    assert(vfs_find("/many/f-65.txt") < 0);
     puts("PASS: v2 slot-free create, list, rename, delete, remount");
 
     char comp255[256], comp256[257];
