@@ -1128,6 +1128,8 @@ int64_t process_syscall_dispatch(uint64_t nr, uint64_t a, uint64_t b, uint64_t c
         q.mounted = storage_mounted();
         q.capacity_bytes = storage_capacity_bytes();
         q.used_bytes = storage_used_bytes();
+        q.arkfs2 = storage_is_v2();
+        q.free_bytes = storage_free_bytes();
         strcopy(q.status, storage_status(), sizeof q.status);
         strcopy(q.error, storage_error(), sizeof q.error);
         strcopy(q.external_status, extfs_status(), sizeof q.external_status);

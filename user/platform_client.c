@@ -411,6 +411,14 @@ uint64_t storage_used_bytes(void) {
     (void)storage_refresh();
     return disk_info.used_bytes;
 }
+bool storage_is_v2(void) {
+    (void)storage_refresh();
+    return disk_info.arkfs2 != 0;
+}
+uint64_t storage_free_bytes(void) {
+    (void)storage_refresh();
+    return disk_info.free_bytes;
+}
 bool storage_sync(void) {
     return vfs_sync();
 }

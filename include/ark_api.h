@@ -229,10 +229,11 @@ typedef struct {
     char mountpoint[32];
 } ArkVolumeInfo;
 typedef struct {
-    uint32_t mounted, reserved;
+    uint32_t mounted, arkfs2;
     uint64_t capacity_bytes, used_bytes;
     char status[128], error[128], external_status[128];
     ArkVolumeInfo volumes[2];
+    uint64_t free_bytes;
 } ArkStorageInfo;
 /* POWER: arg1=0 reboot,1 shutdown. LOG: arg1=buffer,arg2=bounded length<=4096. */
 
