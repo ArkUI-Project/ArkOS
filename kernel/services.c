@@ -1221,11 +1221,30 @@ int64_t process_syscall_dispatch(uint64_t nr, uint64_t a, uint64_t b, uint64_t c
     if (nr == ARK_SYS_STORAGE) {
         ArkStorageInfo q;
         memset(&q, 0, sizeof q);
+        if (b != sizeof q)
+            return EINVAL;
+        if (!get_request(&q, sizeof q, a, b))
+            return EFAULT;
+        uint32_t want = q.flags;
+        int64_t unlock_result = 0;
+        if (want & ARK_STORAGE_DO_UNLOCK) {
+            if (!system_caller()) {
+                memset(q.passphrase, 0, sizeof q.passphrase);
+                return EPERM;
+            }
+            q.passphrase[sizeof q.passphrase - 1] = 0;
+            unlock_result = storage_unlock(q.passphrase) ? 0 : -1;
+        }
+        memset(&q, 0, sizeof q);
         q.mounted = storage_mounted();
         q.capacity_bytes = storage_capacity_bytes();
         q.used_bytes = storage_used_bytes();
         q.arkfs2 = storage_is_v2();
         q.free_bytes = storage_free_bytes();
+        if (storage_needs_unlock())
+            q.flags |= ARK_STORAGE_NEEDS_UNLOCK;
+        if (storage_is_encrypted())
+            q.flags |= ARK_STORAGE_ENCRYPTED;
         strcopy(q.status, storage_status(), sizeof q.status);
         strcopy(q.error, storage_error(), sizeof q.error);
         strcopy(q.external_status, extfs_status(), sizeof q.external_status);
@@ -1238,7 +1257,7 @@ int64_t process_syscall_dispatch(uint64_t nr, uint64_t a, uint64_t b, uint64_t c
                 strcopy(q.volumes[i].mountpoint, v.mountpoint, sizeof q.volumes[i].mountpoint);
             }
         }
-        return b == sizeof q ? reply(a, &q, sizeof q, 0) : EINVAL;
+        return reply(a, &q, sizeof q, unlock_result);
     }
     if (nr == ARK_SYS_POWER) {
         if (a == 0)

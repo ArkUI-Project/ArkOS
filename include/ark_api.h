@@ -231,12 +231,15 @@ typedef struct {
     uint64_t capacity_bytes;
     char mountpoint[32];
 } ArkVolumeInfo;
+enum { ARK_STORAGE_NEEDS_UNLOCK = 1u, ARK_STORAGE_DO_UNLOCK = 2u, ARK_STORAGE_ENCRYPTED = 4u };
 typedef struct {
     uint32_t mounted, arkfs2;
     uint64_t capacity_bytes, used_bytes;
     char status[128], error[128], external_status[128];
     ArkVolumeInfo volumes[2];
     uint64_t free_bytes;
+    uint32_t flags, reserved2; /* NEEDS_UNLOCK|ENCRYPTED out; DO_UNLOCK in */
+    char passphrase[64];       /* in: DO_UNLOCK; kernel zeroes after use */
 } ArkStorageInfo;
 /* POWER: arg1=0 reboot,1 shutdown. LOG: arg1=buffer,arg2=bounded length<=4096. */
 
@@ -410,6 +413,9 @@ typedef struct {
     uint32_t op, disk, present, in_use, media, state, done, total;
     uint64_t sectors;
     char confirm[8], message[128];
+    uint32_t features; /* ARKFS2_FEAT_ENCRYPT / COMPRESS on BEGIN */
+    uint32_t can_encrypt; /* LIST: 1 if RDRAND usable */
+    char passphrase[64]; /* BEGIN when ENCRYPT set */
 } ArkInstallRequest;
 
 /* SYS_DEVICE (44): kernel-owned hardware inventory. Enumeration, query and

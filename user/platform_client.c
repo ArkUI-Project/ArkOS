@@ -20,6 +20,8 @@ static bool info_refresh(void) {
     return ark_info(&system_info) >= 0;
 }
 static bool storage_refresh(void) {
+    disk_info.flags = 0;
+    memset(disk_info.passphrase, 0, sizeof disk_info.passphrase);
     if (ark_call(ARK_SYS_STORAGE, &disk_info, sizeof(disk_info)) < 0)
         return false;
     return true;
@@ -416,6 +418,29 @@ bool storage_is_v2(void) {
 uint64_t storage_free_bytes(void) {
     (void)storage_refresh();
     return disk_info.free_bytes;
+}
+bool storage_needs_unlock(void) {
+    (void)storage_refresh();
+    return (disk_info.flags & ARK_STORAGE_NEEDS_UNLOCK) != 0;
+}
+bool storage_is_encrypted(void) {
+    (void)storage_refresh();
+    return (disk_info.flags & ARK_STORAGE_ENCRYPTED) != 0;
+}
+/* Pre-login unlock card: passphrase crosses once; both copies are wiped. */
+bool storage_unlock(const char *passphrase) {
+    ArkStorageInfo q;
+    memset(&q, 0, sizeof q);
+    q.flags = ARK_STORAGE_DO_UNLOCK;
+    strcopy(q.passphrase, passphrase ? passphrase : "", sizeof q.passphrase);
+    int64_t r = ark_call(ARK_SYS_STORAGE, &q, sizeof q);
+    memset(q.passphrase, 0, sizeof q.passphrase);
+    if (r >= 0) {
+        disk_info = q;
+        return true;
+    }
+    error_copy(q.error);
+    return false;
 }
 bool storage_sync(void) {
     return vfs_sync();

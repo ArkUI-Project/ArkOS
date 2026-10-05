@@ -510,7 +510,26 @@ uint32_t storage_volume_sectors(void) {
     return mounted ? disk_sectors : 0;
 }
 /* Called only by the confirmed SYSTEM/admin installer on an unmounted target. */
-bool storage_install_format(unsigned id, uint32_t start, uint32_t sectors) {
+bool storage_needs_unlock(void) {
+    return vol_v2 && arkfs2_needs_unlock();
+}
+bool storage_is_encrypted(void) {
+    return vol_v2 && (arkfs2_features() & ARKFS2_FEAT_ENCRYPT);
+}
+bool storage_unlock(const char *passphrase) {
+    if (!vol_v2)
+        return false;
+    if (!arkfs2_unlock(passphrase)) {
+        const char *err = arkfs2_error();
+        if (err && err[0])
+            last_error = err;
+        return false;
+    }
+    last_error = "";
+    return true;
+}
+bool storage_install_format(unsigned id, uint32_t start, uint32_t sectors, uint32_t features,
+                            const char *passphrase) {
     if (storage_disk_in_use(id) || sectors < 16384)
         return false;
     BlockDevice *d = block_device(id);
@@ -527,7 +546,10 @@ bool storage_install_format(unsigned id, uint32_t start, uint32_t sectors) {
     data_offset = start;
     disk_sectors = sectors;
     bind_ark();
-    bool okay = arkfs2_format(&ark_vol);
+    Arkfs2FormatOptions opt = {0};
+    opt.features = features & (ARKFS2_FEAT_ENCRYPT | ARKFS2_FEAT_COMPRESS);
+    opt.passphrase = passphrase;
+    bool okay = (opt.features == 0) ? arkfs2_format(&ark_vol) : arkfs2_format_ex(&ark_vol, &opt);
     arkfs2_unmount();
     vol_v2 = false;
     data_disk = old_disk;

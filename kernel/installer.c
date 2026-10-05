@@ -6,8 +6,11 @@
 #include "block.h"
 #include "storage.h"
 #include "extfs.h"
+#include "arkfs2_seal.h"
 static uint8_t buffer[65536] __attribute__((aligned(4096))), mbr[512], header[512], entries[32768];
 static unsigned state, target;
+static uint32_t install_features;
+static char install_pass[64];
 static uint32_t blocks, at, data_start;
 static uint64_t expected;
 static char failure[128];
@@ -109,7 +112,8 @@ static bool finish(void) {
     if (!block_write(d, last, 1, header))
         return false;
     uint32_t data_n = (uint32_t)(backup - data_start);
-    if (!storage_install_format(target, data_start, data_n))
+    if (!storage_install_format(target, data_start, data_n, install_features,
+                                install_features & 1u ? install_pass : 0))
         return false;
     /* Hybrid MBR slot 4 advertises the data volume to the native mount driver. */
     e = mbr + 446 + 3 * 16;
@@ -130,6 +134,7 @@ int64_t installer_request(ArkInstallRequest *q) {
         q->in_use = target_in_use(q->disk);
         q->media = source();
         q->state = state;
+        q->can_encrypt = arkfs2_random_available() ? 1u : 0u;
         strcopy(q->message,
                 q->media ? "Native AHCI installation media ready"
                          : "Boot the ArkOS ISO with an AHCI optical drive",
@@ -145,6 +150,15 @@ int64_t installer_request(ArkInstallRequest *q) {
         data_start = (blocks * 4 + 2047) & ~2047u;
         if (data_start + 16384 >= d->sectors - 65)
             return -28;
+        install_features = q->features & 3u; /* ENCRYPT|COMPRESS */
+        install_pass[0] = 0;
+        if (install_features & 1u) {
+            if (!q->can_encrypt && !arkfs2_random_available())
+                return -1;
+            if (!q->passphrase[0] || !arkfs2_random_available())
+                return -1;
+            strcopy(install_pass, q->passphrase, sizeof install_pass);
+        }
         target = q->disk;
         expected = d->sectors;
         at = 0;
