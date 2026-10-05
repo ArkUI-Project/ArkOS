@@ -6,8 +6,11 @@
 #include "block.h"
 #include "storage.h"
 #include "extfs.h"
+#include "arkfs2_seal.h"
 static uint8_t buffer[65536] __attribute__((aligned(4096))), mbr[512], header[512], entries[32768];
 static unsigned state, target;
+static uint32_t install_features;
+static char install_pass[64];
 static uint32_t blocks, at, data_start;
 static uint64_t expected;
 static char failure[128];
@@ -54,19 +57,51 @@ static bool source(void) {
 }
 static bool finish(void) {
     BlockDevice *d = block_device(target);
-    if (!block_read(d, 1, 1, header) || strncmp((char *)header, "EFI PART", 8))
-        return false;
-    unsigned h = rd(header + 12), n = rd(header + 80), bytes = rd(header + 84);
-    uint64_t table = rd64(header + 72);
-    if (h != 92 || bytes != 128 || n < 4 || n > 256 || table < 2 || table > 128)
-        return false;
-    uint32_t saved = rd(header + 16);
-    wr(header + 16, 0);
-    if (crc(header, h) != saved)
-        return false;
-    unsigned table_n = (n * 128 + 511) / 512;
-    if (!block_read(d, table, table_n, entries) || crc(entries, n * 128) != rd(header + 88))
-        return false;
+    unsigned h, n, bytes, table_n;
+    uint64_t table;
+    bool have_gpt = block_read(d, 1, 1, header) && !strncmp((char *)header, "EFI PART", 8);
+    if (have_gpt) {
+        h = rd(header + 12);
+        n = rd(header + 80);
+        bytes = rd(header + 84);
+        table = rd64(header + 72);
+        if (h != 92 || bytes != 128 || n < 4 || n > 256 || table < 2 || table > 128)
+            return false;
+        uint32_t saved = rd(header + 16);
+        wr(header + 16, 0);
+        if (crc(header, h) != saved)
+            return false;
+        table_n = (n * 128 + 511) / 512;
+        if (!block_read(d, table, table_n, entries) || crc(entries, n * 128) != rd(header + 88))
+            return false;
+    } else {
+        /* mkiso.py ISOs are plain El Torito without hybrid GPT; synthesize one. */
+        n = 128;
+        bytes = 128;
+        h = 92;
+        table = 2;
+        table_n = (n * 128 + 511) / 512;
+        memset(entries, 0, n * 128);
+        memset(header, 0, 512);
+        memcpy(header, "EFI PART", 8);
+        header[10] = 1; /* revision 1.0 */
+        wr(header + 12, h);
+        wr64(header + 24, 1);
+        wr64(header + 40, 34);
+        wr64(header + 72, table);
+        wr(header + 80, n);
+        wr(header + 84, bytes);
+        /* Stable disk GUID so remounts stay recognizable. */
+        const uint8_t disk_guid[16] = {0x41, 0x52, 0x4b, 0x4f, 0x53, 0x47, 0x50, 0x54,
+                                       0x44, 0x49, 0x53, 0x4b, 0x30, 0x30, 0x30, 0x31};
+        memcpy(header + 56, disk_guid, 16);
+        memset(mbr, 0, 512);
+        mbr[446 + 4] = 0xee;
+        wr(mbr + 446 + 8, 1);
+        wr(mbr + 446 + 12, d->sectors > 0xffffffffu ? 0xffffffffu : (uint32_t)(d->sectors - 1));
+        mbr[510] = 0x55;
+        mbr[511] = 0xaa;
+    }
     unsigned slot = 0;
     for (; slot < n; slot++) {
         bool empty = true;
@@ -109,7 +144,8 @@ static bool finish(void) {
     if (!block_write(d, last, 1, header))
         return false;
     uint32_t data_n = (uint32_t)(backup - data_start);
-    if (!storage_install_format(target, data_start, data_n))
+    if (!storage_install_format(target, data_start, data_n, install_features,
+                                install_features & 1u ? install_pass : 0))
         return false;
     /* Hybrid MBR slot 4 advertises the data volume to the native mount driver. */
     e = mbr + 446 + 3 * 16;
@@ -130,6 +166,7 @@ int64_t installer_request(ArkInstallRequest *q) {
         q->in_use = target_in_use(q->disk);
         q->media = source();
         q->state = state;
+        q->can_encrypt = arkfs2_random_available() ? 1u : 0u;
         strcopy(q->message,
                 q->media ? "Native AHCI installation media ready"
                          : "Boot the ArkOS ISO with an AHCI optical drive",
@@ -145,6 +182,13 @@ int64_t installer_request(ArkInstallRequest *q) {
         data_start = (blocks * 4 + 2047) & ~2047u;
         if (data_start + 16384 >= d->sectors - 65)
             return -28;
+        install_features = q->features & 3u; /* ENCRYPT|COMPRESS */
+        install_pass[0] = 0;
+        if (install_features & ARKFS2_FEAT_ENCRYPT) {
+            if (!arkfs2_random_available() || !q->passphrase[0])
+                return -1;
+            strcopy(install_pass, q->passphrase, sizeof install_pass);
+        }
         target = q->disk;
         expected = d->sectors;
         at = 0;
@@ -183,12 +227,12 @@ int64_t installer_request(ArkInstallRequest *q) {
         }
         if (!okay) {
             state = 4;
-            strcopy(failure, "I/O or partition validation failed; target is incomplete",
+            strcopy(failure, "写入分区失败，目标盘未完成",
                     sizeof failure);
         }
     } else if (q->op == ARK_INSTALL_CANCEL && state == 1) {
         state = 3;
-        strcopy(failure, "Cancelled; target disk is incomplete", sizeof failure);
+        strcopy(failure, "安装已取消，目标盘未完成", sizeof failure);
     } else if (q->op != ARK_INSTALL_STATUS && q->op != ARK_INSTALL_STEP)
         return -22;
     q->state = state;

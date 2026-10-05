@@ -24,6 +24,8 @@ static int session_users_window = -1;
 static unsigned session_user_scroll, session_form_first;
 static unsigned session_form, session_field; /* manager: 0 list, 1 create, 2 password */
 static char session_fields[4][96], session_message[128];
+static bool session_disk_gate, session_unlocking;
+static char session_disk_pass[64], session_disk_msg[128];
 
 static void session_erase(void *data, size_t bytes) {
     volatile unsigned char *p = data;
@@ -41,6 +43,13 @@ static void session_clear_private(void) {
     session_form = 0;
     session_manager = false;
     session_new_admin = false;
+    session_erase(session_disk_pass, sizeof session_disk_pass);
+    session_unlocking = false;
+}
+static void session_disk_refresh(void) {
+    session_disk_gate = storage_needs_unlock();
+    if (!session_disk_gate)
+        session_disk_msg[0] = 0;
 }
 static void session_window_closed(int wid) {
     if (wid == session_users_window) {
@@ -55,7 +64,7 @@ static bool session_boot_visible(void) {
     return session_booting;
 }
 static bool session_overlay_visible(void) {
-    return session_booting || !session_active();
+    return session_booting || session_disk_gate || !session_active();
 }
 static void session_ready_log(void) {
     if (session_info.status == SESSION_SETUP)
@@ -115,8 +124,11 @@ static void session_init(void) {
     session_now = session_boot_at = ark_ticks();
     session_poll_at = session_blink_at = session_now;
     session_booting = true;
+    session_disk_gate = false;
+    session_disk_msg[0] = 0;
     session_status();
     session_users_refresh();
+    session_disk_refresh();
     dirty = true;
 }
 static bool session_call(ArkAccountRequest *q) {
@@ -331,9 +343,46 @@ static void session_toggle_disabled(void) {
     (void)session_call(&q);
     session_erase(&q, sizeof q);
 }
+
+static void session_disk_try_unlock(void) {
+    if (session_unlocking)
+        return;
+    session_unlocking = true;
+    dirty = true;
+    bool ok = storage_unlock(session_disk_pass);
+    session_erase(session_disk_pass, sizeof session_disk_pass);
+    session_unlocking = false;
+    if (ok) {
+        session_disk_msg[0] = 0;
+        session_disk_refresh();
+        if (!session_disk_gate) {
+            session_status();
+            session_users_refresh();
+            session_ready_log();
+        }
+    } else {
+        const char *err = storage_error();
+        strcopy(session_disk_msg, err && err[0] ? err : "口令错误", sizeof session_disk_msg);
+    }
+    dirty = true;
+}
 static bool session_key(int key) {
     if (session_booting)
         return true;
+    if (session_disk_gate) {
+        if (session_unlocking)
+            return true;
+        size_t n = strlen(session_disk_pass);
+        if (key == KEY_BACKSPACE && n)
+            session_disk_pass[n - 1] = 0;
+        else if (key >= 32 && key < 127 && n + 1 < sizeof session_disk_pass) {
+            session_disk_pass[n] = (char)key;
+            session_disk_pass[n + 1] = 0;
+        } else if (key == KEY_ENTER)
+            session_disk_try_unlock();
+        dirty = true;
+        return true;
+    }
     if (session_active() && !session_users_focused()) {
         if (key == 21) {
             session_open_users();
@@ -512,6 +561,13 @@ static bool session_pointer(bool pressed) {
         return session_users_pointer(pressed);
     if (!pressed || session_booting)
         return true;
+    if (session_disk_gate) {
+        int x = (sw - 420) / 2, y = (sh - 280) / 2, w = 420;
+        if (in(mx, my, x + 28, y + 218, w - 56, 36) && !session_unlocking)
+            session_disk_try_unlock();
+        dirty = true;
+        return true;
+    }
     if (session_keyboard_pointer())
         return true;
     int x, y, w, h;
@@ -562,6 +618,24 @@ static bool session_render(void) {
         text(cx - utf8_width("ArkOS"), top + size + 23, "ArkOS", 0xeef7ff, 2);
         rr(cx - 90, top + group_h - 4, 180, 4, 2, 0xffffff, 35);
         rr(cx - 90, top + group_h - 4, (int)elapsed * 180 / 300, 4, 2, 0xd3eeff, 235);
+        return true;
+    }
+    if (session_disk_gate) {
+        int x = (sw - 420) / 2, y = (sh - 280) / 2, w = 420, h = 280;
+        glass(x, y, w, h, 22, 220);
+        stroke(x, y, w, h, 22, 0xb9ddff, 70);
+        symbol(x + w / 2 - 14, y + 28, 28, ARKUI_SYMBOL_LOCK, 0xd3eeff);
+        text(x + 28, y + 72, "磁盘已加密", 0xffffff, 2);
+        label(x + 28, y + 118, "输入磁盘口令以继续。登录密码不会解锁磁盘。", 0xc5d6ed);
+        rr(x + 28, y + 158, w - 56, 42, 10, 0xffffff, session_unlocking ? 18 : 28);
+        label(x + 42, y + 170,
+              session_unlocking ? "正在解锁…"
+              : (session_disk_pass[0] ? "••••••••" : "磁盘口令"),
+              0xaec7e3);
+        button(x + 28, y + 218, w - 56, session_unlocking ? "正在解锁…" : "解锁",
+               !session_unlocking);
+        if (session_disk_msg[0])
+            label(x + 28, y + 262, session_disk_msg, 0xffb4a8);
         return true;
     }
     int x, y, w, h;
@@ -626,7 +700,11 @@ static void session_tick(uint64_t now) {
         dirty = true;
         if (now >= session_boot_at && now - session_boot_at >= 30) {
             session_booting = false;
-            session_ready_log();
+            session_disk_refresh();
+            if (!session_disk_gate)
+                session_ready_log();
+            else
+                serial_write("[session] disk unlock required\n");
         }
     }
     if (session_overlay_visible() && now / 50 != session_blink_at / 50)

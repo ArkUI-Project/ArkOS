@@ -28,6 +28,28 @@ static unsigned capture_count;
 static ArkInstallRequest install_disks[2], install_state;
 static unsigned install_choice;
 static char install_confirm[8];
+static bool install_encrypt, install_compress;
+static unsigned install_field; /* 0=ERASE, 1=pass, 2=pass2 */
+static char install_pass[64], install_pass2[64];
+/* Content Y of 「开始安装」; keep draw/click/Enter in sync. */
+static int install_start_ty(int content_y, bool can_enc) {
+    int ty = content_y + 208;
+    ty += 78; /* encrypt */
+    ty += 78; /* compress */
+    if (install_encrypt && can_enc)
+        ty += 96; /* passphrase rows */
+    ty += 52; /* ERASE */
+    return ty;
+}
+static void install_fit_window(void) {
+    Window *w = app_window(12);
+    int need = install_encrypt ? 720 : 620;
+    if (w->h < need) {
+        w->h = need;
+        if (w->y + w->h > sh - 104)
+            w->y = max(45, sh - 104 - w->h);
+    }
+}
 static ArkActivityRequest external_activity;
 static uint64_t activity_refresh;
 static int native_island_anchor(void) {
@@ -185,6 +207,10 @@ static void native_open(int app) {
         native_capture_list();
     if (app == 12) {
         install_confirm[0] = 0;
+        install_pass[0] = install_pass2[0] = 0;
+        install_encrypt = install_compress = false;
+        install_field = 0;
+        install_fit_window();
         for (unsigned i = 0; i < 2; i++) {
             install_disks[i] = (ArkInstallRequest){0};
             install_disks[i].disk = i;
@@ -563,14 +589,27 @@ static bool native_key(int k) {
         return true;
     }
     if (focused_app() == 12 && !dialog_kind && install_state.state != 1) {
-        size_t n = strlen(install_confirm);
+        char *buf = install_field == 1   ? install_pass
+                    : install_field == 2 ? install_pass2
+                                         : install_confirm;
+        size_t cap = install_field ? 63 : 5;
+        size_t n = strlen(buf);
         if (k == KEY_BACKSPACE && n)
-            install_confirm[n - 1] = 0;
-        else if (k >= 32 && k < 127 && n < 5) {
-            install_confirm[n] = (char)k;
-            install_confirm[n + 1] = 0;
-        } else if (k == KEY_ENTER)
-            native_click(12, windows[12].x + 35, windows[12].y + 390);
+            buf[n - 1] = 0;
+        else if (k >= 32 && k < 127 && n < cap) {
+            buf[n] = (char)k;
+            buf[n + 1] = 0;
+        } else if (k == KEY_TAB) {
+            if (install_encrypt)
+                install_field = (install_field + 1) % 3;
+            else
+                install_field = 0;
+        } else if (k == KEY_ENTER) {
+            Window *iw = app_window(12);
+            bool can_enc = install_disks[install_choice].can_encrypt != 0;
+            int cy = iw->y + 77;
+            native_click(12, iw->x + 35, install_start_ty(cy, can_enc) + 10);
+        }
         else
             return false;
         dirty = true;
@@ -599,33 +638,68 @@ static void native_draw_app(int app, Window *w) {
         }
         clip(x, w->y + w->h - 33, "Ctrl+P 截图 · Ctrl+R 开始或停止录屏", width, muted);
     } else if (app == 12) {
+        bool can_enc = install_disks[install_choice].can_encrypt != 0;
         label(x, y, "将 ArkOS 安装到硬盘", ink);
         clip(x, y + 35, "清空目标盘并迁移账号与文本；已挂载的盘不可覆盖。", width, 0xcc574e);
         for (unsigned i = 0; i < 2; i++) {
-            int yy = y + 81 + (int)i * 58;
-            rr(x, yy, width, 49, 10, accent, install_choice == i ? 45 : 15);
-            label(x + 15, yy + 14, i ? "磁盘 1" : "磁盘 0", ink);
+            int yy = y + 70 + (int)i * 52;
+            rr(x, yy, width, 44, 10, accent, install_choice == i ? 45 : 15);
+            label(x + 15, yy + 12, i ? "磁盘 1" : "磁盘 0", ink);
             if (install_disks[i].present) {
-                num(x + 125, yy + 14, install_disks[i].sectors / 2048, ink);
-                label(x + 210, yy + 14, "MiB", muted);
-                label(x + 310, yy + 14,
+                num(x + 125, yy + 12, install_disks[i].sectors / 2048, ink);
+                label(x + 210, yy + 12, "MiB", muted);
+                label(x + 300, yy + 12,
                       install_disks[i].in_use ? "正在使用 · 禁止覆盖" : "可选择 · 安装将清空",
                       muted);
             } else
-                label(x + 125, yy + 14, "未发现", muted);
+                label(x + 125, yy + 12, "未发现", muted);
         }
-        clip(x, y + 218, install_disks[install_choice].message, width, muted);
-        label(x, y + 254, "输入 ERASE 确认清盘：", ink);
-        rr(x + 230, y + 244, 140, 40, 8, accent, 20);
-        label(x + 245, y + 255, install_confirm, ink);
-        button(x, y + 303, 160, install_state.state == 1 ? "安装进行中" : "开始安装", true);
-        button(x + 175, y + 303, 120, "刷新设备", false);
-        if (install_state.total) {
-            rr(x, y + 362, width, 8, 4, accent, 25);
-            rr(x, y + 362, (int)((uint64_t)width * install_state.done / install_state.total), 8, 4,
-               accent, 255);
+        clip(x, y + 178, install_disks[install_choice].message, width, muted);
+        /* Options sit below the disk list and above ERASE (Designer). */
+        {
+            int ty = y + 208;
+            uint32_t enc_ink = can_enc ? ink : muted;
+            rr(x, ty, width, 40, 10, accent, install_encrypt && can_enc ? 35 : 12);
+            label(x + 14, ty + 11, "加密磁盘", enc_ink);
+            rr(x + width - 62, ty + 10, 44, 20, 10, accent, can_enc ? (install_encrypt ? 200 : 55) : 30);
+            rr(x + width - (install_encrypt && can_enc ? 34 : 56), ty + 12, 16, 16, 8, 0xffffff,
+               can_enc ? 230 : 90);
+            clip(x, ty + 44, can_enc ? "开机需要输入口令；忘记口令无法恢复"
+                                     : "此设备不支持加密",
+                 width, muted);
+            ty += 78;
+            rr(x, ty, width, 40, 10, accent, install_compress ? 35 : 12);
+            label(x + 14, ty + 11, "压缩", ink);
+            rr(x + width - 62, ty + 10, 44, 20, 10, accent, install_compress ? 200 : 55);
+            rr(x + width - (install_compress ? 34 : 56), ty + 12, 16, 16, 8, 0xffffff, 230);
+            clip(x, ty + 44, "节省空间，读写会稍慢", width, muted);
+            ty += 78;
+            if (install_encrypt && can_enc) {
+                label(x, ty, "口令", ink);
+                rr(x + 110, ty - 8, width - 110, 36, 8, accent, install_field == 1 ? 40 : 18);
+                label(x + 122, ty + 2, install_pass[0] ? "••••••••" : "", muted);
+                ty += 48;
+                label(x, ty, "再次输入", ink);
+                rr(x + 110, ty - 8, width - 110, 36, 8, accent, install_field == 2 ? 40 : 18);
+                label(x + 122, ty + 2, install_pass2[0] ? "••••••••" : "", muted);
+                ty += 48;
+            }
+            label(x, ty, "输入 ERASE 确认清盘：", ink);
+            rr(x + 230, ty - 8, 140, 36, 8, accent, install_field == 0 ? 40 : 18);
+            label(x + 245, ty + 2, install_confirm, ink);
+            ty = install_start_ty(y, can_enc);
+            bool ready = !strcmp(install_confirm, "ERASE");
+            if (install_encrypt && can_enc)
+                ready = ready && install_pass[0] && !strcmp(install_pass, install_pass2);
+            button(x, ty, 160, install_state.state == 1 ? "安装进行中" : "开始安装", ready);
+            button(x + 175, ty, 120, "刷新设备", false);
+            if (install_state.total) {
+                rr(x, ty + 52, width, 8, 4, accent, 25);
+                rr(x, ty + 52, (int)((uint64_t)width * install_state.done / install_state.total), 8, 4,
+                   accent, 255);
+            }
+            clip(x, ty + 72, install_state.message, width, muted);
         }
-        clip(x, y + 389, install_state.message, width, muted);
     }
 }
 static void native_click(int app, int px, int py) {
@@ -651,24 +725,68 @@ static void native_click(int app, int px, int py) {
                 }
     }
     if (app == 12 && install_state.state != 1) {
+        bool can_enc = install_disks[install_choice].can_encrypt != 0;
         for (unsigned i = 0; i < 2; i++)
-            if (in(px, py, x, y + 81 + (int)i * 58, width, 49))
+            if (in(px, py, x, y + 70 + (int)i * 52, width, 44))
                 install_choice = i;
-        if (in(px, py, x + 175, y + 303, 120, 36))
+        int ty = y + 208;
+        if (in(px, py, x, ty, width, 40) && can_enc) {
+            install_encrypt = !install_encrypt;
+            install_fit_window();
+        }
+        ty += 78;
+        if (in(px, py, x, ty, width, 40))
+            install_compress = !install_compress;
+        ty += 78;
+        if (install_encrypt && can_enc) {
+            if (in(px, py, x + 110, ty - 8, width - 110, 36))
+                install_field = 1;
+            ty += 48;
+            if (in(px, py, x + 110, ty - 8, width - 110, 36))
+                install_field = 2;
+            ty += 48;
+        }
+        if (in(px, py, x + 230, ty - 8, 140, 36))
+            install_field = 0;
+        ty = install_start_ty(y, can_enc);
+        if (in(px, py, x + 175, ty, 120, 36))
             native_open(12);
-        if (in(px, py, x, y + 303, 160, 36)) {
-            if (strcmp(install_confirm, "ERASE")) {
-                notice("请先输入 ERASE，确认清空所选磁盘");
+        if (in(px, py, x, ty, 160, 36)) {
+            bool can_start = !strcmp(install_confirm, "ERASE");
+            if (install_encrypt && can_enc)
+                can_start = can_start && install_pass[0] && !strcmp(install_pass, install_pass2);
+            if (install_encrypt && !can_enc) {
+                notice("此设备不支持加密");
+                return;
+            }
+            if (!can_start) {
+                if (strcmp(install_confirm, "ERASE"))
+                    notice("请先输入 ERASE，确认清空所选磁盘");
+                else if (install_encrypt && can_enc && !install_pass[0])
+                    notice("口令不能为空");
+                else if (install_encrypt && can_enc)
+                    notice("两次口令不一致");
                 return;
             }
             install_state = install_disks[install_choice];
             install_state.op = ARK_INSTALL_BEGIN;
             strcopy(install_state.confirm, install_confirm, sizeof install_state.confirm);
+            install_state.features = 0;
+            if (install_encrypt && can_enc)
+                install_state.features |= 1u;
+            if (install_compress)
+                install_state.features |= 2u;
+            if (install_state.features & 1u)
+                strcopy(install_state.passphrase, install_pass, sizeof install_state.passphrase);
+            else
+                install_state.passphrase[0] = 0;
             if (ark_call(ARK_SYS_INSTALL, &install_state, sizeof install_state) < 0) {
                 notice("无法开始安装：检查目标盘、管理员权限与 AHCI 光驱");
                 install_state.state = 0;
             }
+            memset(install_state.passphrase, 0, sizeof install_state.passphrase);
             install_confirm[0] = 0;
+            install_pass[0] = install_pass2[0] = 0;
         }
     }
     dirty = true;

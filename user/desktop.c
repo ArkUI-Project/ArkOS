@@ -1057,6 +1057,8 @@ static void settings_build(Window *w) {
             settings_info(card, "已用", number);
             settings_number(number, storage_free_bytes(), " B");
             settings_info(card, "剩余", number);
+            if (storage_is_encrypted())
+                settings_info(card, "加密", "仅文件内容");
         } else {
             settings_info(card, "系统磁盘",
                           storage_mounted() ? "读写 · 系统数据盘" : "未挂载 · 内存会话");
@@ -2926,6 +2928,7 @@ int main(void) {
     windows[4] = (Window){(sw - 500) / 2, 83, 500, 560, 0, 0, 0, 0, false, false};
     windows[5] = (Window){(sw - 660) / 2, 110, 660, 540, 0, 0, 0, 0, false, false};
     windows[6] = (Window){200, 100, 880, 560, 0, 0, 0, 0, false, false};
+    windows[12].h = 720;
     windows[16].h = 620;
     windows[10] = (Window){(sw - 1040) / 2, 58, 1040, 642, 0, 0, 0, 0, false, false};
     for (int i = 0; i < APPS; i++) {

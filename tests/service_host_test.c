@@ -349,6 +349,16 @@ uint64_t storage_capacity_bytes(void) {
 uint64_t storage_used_bytes(void) {
     return 0;
 }
+bool storage_needs_unlock(void) {
+    return false;
+}
+bool storage_is_encrypted(void) {
+    return false;
+}
+bool storage_unlock(const char *passphrase) {
+    (void)passphrase;
+    return false;
+}
 bool extfs_read_bytes(int i, uint64_t off, void *b, size_t cap, size_t *n) {
     (void)i;
     (void)off;

@@ -22,7 +22,11 @@ bool vfs_mkdir(const char *path);
 bool vfs_rename(const char *oldpath, const char *newpath);
 bool vfs_copy(const char *oldpath, const char *newpath);
 bool storage_disk_in_use(unsigned id);
-bool storage_install_format(unsigned id, uint32_t start, uint32_t sectors);
+bool storage_install_format(unsigned id, uint32_t start, uint32_t sectors,
+                            uint32_t features, const char *passphrase);
+bool storage_needs_unlock(void);
+bool storage_unlock(const char *passphrase);
+bool storage_is_encrypted(void);
 bool storage_volume_io(uint32_t lba, uint32_t n, void *buf, bool write);
 bool storage_volume_flush(void);
 uint32_t storage_volume_sectors(void);
