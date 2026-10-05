@@ -10,7 +10,7 @@ from pathlib import Path
 
 HEADER = 256
 MAX_BYTES = 8*1024*1024-32
-CAPS = {"ui": 4, "files": 2, "network": 8, "activity": 32}
+CAPS = {"ui": 4, "files": 2, "network": 8, "activity": 32, "device": 64}
 EH = struct.Struct("<16sHHIQQQIHHHHHH")
 PH = struct.Struct("<IIQQQQQQ")
 

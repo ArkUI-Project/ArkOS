@@ -36,6 +36,9 @@ typedef struct {
 /* Initialize AFTER all driver/MMIO mappings are installed. Requires NX and
  * enough contiguous RAM for the kernel's 256 MiB physical-page pool. */
 bool process_init(void);
+/* Kernel root page table captured by process_init; module code uses it to
+ * wire the PML4[1] driver window shared by every process address space. */
+uint64_t process_kernel_cr3(void);
 void *process_kernel_alloc(size_t bytes);
 void process_kernel_free(void *pointer, size_t bytes);
 int process_spawn_elf(const void *image, size_t bytes, const char *name, uint32_t uid,

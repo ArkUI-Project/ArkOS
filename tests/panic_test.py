@@ -9,7 +9,7 @@ objects=sorted(str(p) for p in (ROOT/'build').glob('*.o') if p.name!='main.o')
 tree=out/'iso';(tree/'boot/grub').mkdir(parents=True,exist_ok=True)
 subprocess.run(['ld','-nostdlib','-z','noexecstack','-z','max-page-size=0x1000','-T','boot/linker.ld',str(out/'fixture.o'),*objects,'-o',str(tree/'boot/kernel.elf')],check=True,cwd=ROOT)
 shutil.copyfile(ROOT/'boot/grub.cfg',tree/'boot/grub/grub.cfg')
-with (out/'build.log').open('w') as f:subprocess.run(['grub-mkrescue','-o',str(out/'panic.iso'),str(tree)],check=True,stdout=f,stderr=f)
+with (out/'build.log').open('w') as f:subprocess.run(['python3',str(ROOT/'scripts/mkiso.py'),str(tree),str(out/'panic.iso')],check=True,stdout=f,stderr=f)
 os.environ['ARKOS_ISO']=str(out/'panic.iso');os.environ['ARKOS_SMP']='4';os.environ['ARKOS_MACHINE']='q35'
 class PanicVM(VM):
  def wait(self,s,timeout=20,after=0):return super().wait('[panic] invalid opcode',timeout,after)

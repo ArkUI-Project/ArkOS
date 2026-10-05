@@ -23,16 +23,19 @@ make run
 
 macOS 可使用 x86-64 freestanding 交叉 Clang/LLD，并通过 `CC`、`LD`
 覆盖命令。GRUB 适配器读取 `ARKOS_GRUB_CACHE` 指定的已解包组件，
-其来源与解包说明见 [GRUB](third_party/grub/README.md)；入口是
-`scripts/grub-mkrescue-macos.py`。这些本机构建步骤需要单独准备工具链。
+其来源与解包说明见 [GRUB](third_party/grub/README.md)。ISO 由
+`scripts/mkiso.py` 直接组装，不依赖 `grub-mkrescue` 或 mtools。
 
 ## 验证入口
 
 ```sh
 make check
 make check-security-host check-package-host check-v7-host check-v8-host
+make check-device-host check-module-host check-registry-host
 make check-wasm-host
 OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd make check-runtime
+python3 tests/arco_vm_test.py bios
+OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd python3 tests/arco_vm_test.py uefi
 python3 tests/spice_mouse_vm_test.py bios
 OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd python3 tests/spice_mouse_vm_test.py uefi
 make arm64

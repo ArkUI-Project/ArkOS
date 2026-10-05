@@ -9,4 +9,7 @@ int64_t blob_kernel_request(ArkBlobRequest *request, uint32_t uid);
  * an unclaimed raw disk range and is hidden from every userspace namespace. */
 bool blob_swap_io(unsigned slot, void *page, bool write);
 uint64_t blob_swap_capacity(void);
+#ifdef ARK_BLOB_HOST_TEST
+void blob_test_reset(void);
+#endif
 #endif

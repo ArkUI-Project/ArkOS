@@ -23,7 +23,7 @@ run([CC,*flags,'-c',ROOT/'tests/package_count_fixture.c','-o',OUT/'fixture.o'])
 objects=sorted(p for p in (ROOT/'build').glob('*.o') if p.stem in [s.stem for s in (ROOT/'kernel').glob('*.c')] and p.stem!='main')
 objects += [ROOT/'build'/(s+'.o') for s in ['entry','ap','interrupts','user_entry','programs_embed']]+sorted((ROOT/'build/bearssl').rglob('*.o'))
 tree=OUT/'iso';(tree/'boot/grub').mkdir(parents=True,exist_ok=True);elf=tree/'boot/kernel.elf';run([LD,'-nostdlib','--gc-sections','-z','noexecstack','-z','max-page-size=0x1000','-T',ROOT/'boot/linker.ld',OUT/'fixture.o',OUT/'controller-embed.o',*objects,'-o',elf])
-(tree/'boot/grub/grub.cfg').write_text('set timeout=0\ninsmod all_video\nset gfxmode=1280x800x32\nset gfxpayload=keep\nmenuentry "Package count test" {\n multiboot2 /boot/kernel.elf\n boot\n}\n');iso=OUT/'package-count.iso';run(['grub-mkrescue','-o',iso,tree]);log.close();disk=OUT/'data.img';fresh_data_disk(disk)
+(tree/'boot/grub/grub.cfg').write_text('set timeout=0\ninsmod all_video\nset gfxmode=1280x800x32\nset gfxpayload=keep\nmenuentry "Package count test" {\n multiboot2 /boot/kernel.elf\n boot\n}\n');iso=OUT/'package-count.iso';run(['python3',str(ROOT/'scripts/mkiso.py'),tree,iso]);log.close();disk=OUT/'data.img';fresh_data_disk(disk)
 results=[]
 for phase in ['install','reboot']:
  serial=OUT/(phase+'.log');serial.write_text('');err=(OUT/(phase+'-qemu.log')).open('w');p=subprocess.Popen(['qemu-system-x86_64','-cpu','max','-m','512M','-vga','vmware','-cdrom',str(iso),'-boot','d','-drive','file='+str(disk)+',format=raw,if=ide,index=0','-display','none','-serial','file:'+str(serial),'-nic','none'],stdout=err,stderr=err)

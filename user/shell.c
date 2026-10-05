@@ -598,6 +598,113 @@ static bool builtin(Stage *s, const char *input, Output *out) {
                 shell_action = (int)ark_catalog[i].desktop;
         return true;
     }
+    if (same(cmd, "dev")) {
+        /* Device inventory and loadable .arco drivers. Listing needs only an
+         * active session; install and remove need SYSTEM plus an admin
+         * account, and the kernel re-verifies every image against the
+         * protected manifest before it maps or runs a byte. */
+        ArkDeviceRequest d = {0};
+        if (argc == 1 || same(a[1], "list")) {
+            unsigned count = 0;
+            for (unsigned i = 0;; i++) {
+                d = (ArkDeviceRequest){.op = ARK_DEV_ENUMERATE, .index = i};
+                int64_t r = ark_device(&d);
+                if (r == -2)
+                    break;
+                if (r < 0)
+                    return fail(d.error[0] ? d.error : "Device inventory is unavailable.");
+                count++;
+                put(out, "dev ");
+                num(out, i);
+                put(out, " ");
+                line(out, d.info.name);
+                put(out, "    class ");
+                num(out, d.info.class_id);
+                put(out, "  state ");
+                num(out, d.info.state);
+                put(out, "  ");
+                line(out, d.info.detail);
+            }
+            if (!count)
+                line(out, "No devices reported.");
+            return true;
+        }
+        ArkDriverRequest q = {0};
+        if (same(a[1], "drivers")) {
+            unsigned count = 0;
+            for (unsigned i = 0;; i++) {
+                q = (ArkDriverRequest){.op = ARK_DRV_LIST, .index = i};
+                int64_t r = ark_driver(&q);
+                if (r == -2)
+                    break;
+                if (r < 0)
+                    return fail(q.error[0] ? q.error : "Driver list is unavailable.");
+                count++;
+                put(out, q.info.name);
+                put(out, "  v");
+                num(out, q.info.version >> 16);
+                put(out, ".");
+                num(out, (q.info.version >> 8) & 255u);
+                put(out, ".");
+                num(out, q.info.version & 255u);
+                put(out, "  ");
+                line(out, q.info.state == ARK_DRV_STATE_LOADED ? "loaded" :
+                            q.info.state == ARK_DRV_STATE_DISABLED ? "disabled" : "failed");
+                put(out, "    ");
+                line(out, q.info.detail);
+            }
+            if (!count)
+                line(out, "No loadable drivers installed.");
+            return true;
+        }
+        if (same(a[1], "query")) {
+            if (!usage(argc == 3, "Usage: dev query NAME"))
+                return false;
+            q = (ArkDriverRequest){.op = ARK_DRV_QUERY};
+            strcopy(q.name, a[2], sizeof q.name);
+            if (ark_driver(&q) < 0)
+                return fail(q.error[0] ? q.error : "Driver is not installed.");
+            put(out, q.info.name);
+            put(out, "  state ");
+            num(out, q.info.state);
+            put(out, "  bytes ");
+            num(out, q.info.image_bytes);
+            line(out, "");
+            put(out, "sha256 ");
+            char hex[65];
+            for (unsigned i = 0; i < 32; i++)
+                for (unsigned j = 0; j < 2; j++) {
+                    unsigned nibble = (q.info.sha256[i] >> (j ? 0 : 4)) & 15u;
+                    hex[i * 2 + j] = (char)(nibble < 10 ? '0' + nibble : 'a' + nibble - 10);
+                }
+            hex[64] = 0;
+            line(out, hex);
+            return true;
+        }
+        if (same(a[1], "install")) {
+            if (!usage(argc == 3, "Usage: dev install PATH.arco|blob:NAME"))
+                return false;
+            q = (ArkDriverRequest){.op = ARK_DRV_INSTALL};
+            strcopy(q.path, a[2], sizeof q.path);
+            if (ark_driver(&q) < 0)
+                return fail(q.error[0] ? q.error : "Driver installation refused.");
+            put(out, "Installed ");
+            line(out, q.info.name);
+            return true;
+        }
+        if (same(a[1], "remove")) {
+            if (!usage(argc == 3, "Usage: dev remove NAME"))
+                return false;
+            q = (ArkDriverRequest){.op = ARK_DRV_REMOVE};
+            strcopy(q.name, a[2], sizeof q.name);
+            if (ark_driver(&q) < 0)
+                return fail(q.error[0] ? q.error : "Driver removal refused.");
+            put(out, "Removed ");
+            line(out, q.name);
+            return true;
+        }
+        return fail("Usage: dev [list|drivers|query NAME|install PATH|remove NAME]");
+    }
     if (same(cmd, "pkg")) {
         if (!usage(argc >= 2, "Usage: pkg list|info|install|upgrade|remove|grant|run ..."))
             return false;

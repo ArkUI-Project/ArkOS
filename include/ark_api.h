@@ -16,6 +16,7 @@
 #define ARK_CAP_NETWORK 8u
 #define ARK_CAP_PROCESS 16u
 #define ARK_CAP_ACTIVITY 32u
+#define ARK_CAP_DEVICE 64u
 #define ARK_APP_BROWSER 6u
 #define ARK_APP_CLOCK 7u
 #define ARK_APP_PAINT 8u
@@ -60,7 +61,9 @@ enum {
     ARK_SYS_DRAG = 40,
     ARK_SYS_PERFORMANCE = 41,
     ARK_SYS_VM = 42,
-    ARK_SYS_COMPOSITOR = 43
+    ARK_SYS_COMPOSITOR = 43,
+    ARK_SYS_DEVICE = 44,
+    ARK_SYS_DRIVER = 45
 };
 enum {
     ARK_VM_RESERVE = 0,
@@ -408,6 +411,80 @@ typedef struct {
     char confirm[8], message[128];
 } ArkInstallRequest;
 
+/* SYS_DEVICE (44): kernel-owned hardware inventory. Enumeration, query and
+ * counters are public inventory in an active session; reads and controls need
+ * ARK_CAP_DEVICE. No request field grants authority: class, flags and identity
+ * come from kernel device state, never from the caller. */
+enum {
+    ARK_DEV_ENUMERATE = 0,
+    ARK_DEV_QUERY = 1,
+    ARK_DEV_STATS = 2,
+    ARK_DEV_READ = 3,
+    ARK_DEV_CONTROL = 4
+};
+enum { ARK_DEVCTL_FLUSH = 1, ARK_DEVCTL_REFRESH = 2 };
+enum {
+    ARK_DEV_CLASS_PLATFORM = 1,
+    ARK_DEV_CLASS_CPU = 2,
+    ARK_DEV_CLASS_BLOCK = 3,
+    ARK_DEV_CLASS_NETWORK = 4,
+    ARK_DEV_CLASS_DISPLAY = 5,
+    ARK_DEV_CLASS_INPUT = 6,
+    ARK_DEV_CLASS_SERIAL = 7,
+    ARK_DEV_CLASS_VOLUME = 8,
+    ARK_DEV_CLASS_POWER = 9,
+    ARK_DEV_CLASS_SENSOR = 10,
+    ARK_DEV_CLASS_PCI = 11
+};
+enum { ARK_BUS_PLATFORM = 0, ARK_BUS_PCI = 1, ARK_BUS_ISA = 2, ARK_BUS_VIRTUAL = 3 };
+enum { ARK_DEV_PRESENT = 1u, ARK_DEV_READABLE = 2u, ARK_DEV_WRITABLE = 4u,
+       ARK_DEV_SYSTEM_VOLUME = 8u, ARK_DEV_REMOVABLE = 16u, ARK_DEV_MODULE = 32u };
+enum { ARK_DEV_STATE_UNKNOWN = 0, ARK_DEV_STATE_OK = 1, ARK_DEV_STATE_ERROR = 2,
+       ARK_DEV_STATE_ABSENT = 3 };
+#define ARK_DEV_READ_CAP 65536u
+#define ARK_DEV_READ_SECTORS 128u
+typedef struct {
+    uint32_t index, class_id, bus, bdf, vendor, device, device_class, flags, state, unit;
+    uint64_t blocks, generation, rx_bytes, tx_bytes, ops, errors, last_event_ms;
+    char name[48], driver[32], detail[96];
+} ArkDeviceInfo;
+typedef struct {
+    uint32_t op, index, flags, generation, control, capability, status;
+    uint64_t buffer, offset;
+    uint32_t capacity, count, sectors, reserved;
+    char error[128];
+    ArkDeviceInfo info;
+} ArkDeviceRequest;
+/* READ on a BLOCK node copies ARK_DEV_READ_CAP bounded sectors into buffer. The
+ * ArkFS system volume is never readable this way and no class has a write path. */
+enum {
+    ARK_DRV_LIST = 0,
+    ARK_DRV_QUERY = 1,
+    ARK_DRV_INSTALL = 2,
+    ARK_DRV_REMOVE = 3
+};
+enum {
+    ARK_DRV_STATE_LOADED = 1,
+    ARK_DRV_STATE_DISABLED = 2,
+    ARK_DRV_STATE_FAILED = 3
+};
+typedef struct {
+    uint32_t index, state, version, api, flags;
+    uint64_t image_bytes, bytes;
+    char name[32], detail[96];
+    uint8_t sha256[32];
+} ArkDriverInfo;
+typedef struct {
+    uint32_t op, index, flags, count;
+    char path[128], name[32], error[128];
+    ArkDriverInfo info;
+} ArkDriverRequest;
+/* LIST/QUERY report the installed set in an active session. INSTALL accepts an
+ * .arco from a scoped local path or blob:NAME, verifies it against the
+ * protected manifest and activates it; REMOVE disables the module and drops
+ * its manifest entry. Both mutations need SYSTEM, an active admin session and
+ * a well-formed ARCO1 image; code executes only inside the kernel. */
+
 #ifndef ARK_KERNEL
 #ifdef ARK_API_HOST_TEST
 /* Host regression seam only: production builds always execute int80. */
@@ -507,6 +584,12 @@ static inline int64_t ark_registry(ArkRegistryRequest *p) {
 }
 static inline int64_t ark_drag(ArkDragRequest *p) {
     return ark_call(ARK_SYS_DRAG, p, sizeof(*p));
+}
+static inline int64_t ark_device(ArkDeviceRequest *p) {
+    return ark_call(ARK_SYS_DEVICE, p, sizeof(*p));
+}
+static inline int64_t ark_driver(ArkDriverRequest *p) {
+    return ark_call(ARK_SYS_DRIVER, p, sizeof(*p));
 }
 #endif
 #endif

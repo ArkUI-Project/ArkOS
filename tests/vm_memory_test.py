@@ -27,7 +27,7 @@ def image(name):
  tree=OUT/name;(tree/'boot/grub').mkdir(parents=True,exist_ok=True)
  run([LD,'-nostdlib','--gc-sections','-z','noexecstack','-z','max-page-size=0x1000','-T',str(ROOT/'boot/linker.ld'),*objects,'-o',str(tree/'boot/kernel.elf')],stdout=log,stderr=log)
  (tree/'boot/grub/grub.cfg').write_text('set timeout=0\nset default=0\ninsmod all_video\nset gfxmode=1280x800x32\nset gfxpayload=keep\nterminal_output gfxterm\nmenuentry "ArkOS memory validation" {\n multiboot2 /boot/kernel.elf\n boot\n}\n')
- iso=OUT/(name+'.iso');run(['grub-mkrescue','-o',str(iso),str(tree)],stdout=log,stderr=log);return iso
+ iso=OUT/(name+'.iso');run(['python3',str(ROOT/'scripts/mkiso.py'),str(tree),str(iso)],stdout=log,stderr=log);return iso
 iso=image('memory');results=[]
 os.environ.update(ARKOS_MACHINE='q35',ARKOS_SMP='1')
 for fw in ([] if '--failure-only' in sys.argv else ['bios','uefi']):

@@ -2,7 +2,24 @@
 
 应用是静态 ELF64，在 ArkOS 自研内核的 Ring3、私有页表与真实 UID 下执行。公开 ABI 以 `include/ark_api.h` 为准，完整行为与错误语义见 [API](../docs/API.md)。SDK 是本项目 x86-64 原生接口；普通构建离线完成。
 
-## 构建与安装
+## 内核驱动 SDK
+
+`.arco` 是可加载内核驱动映像，运行在 Ring 0。接口见 [driver.h](driver.h)，
+格式、隔离与限制见 [DRIVERS](../docs/DRIVERS.md)。示例 [driver_demo.c](driver_demo.c)
+枚举真实 PCI 总线、登记一个设备节点并注册 poll 回调：
+
+```sh
+python3 scripts/arco.py sdk/driver_demo.c -o build/demo.arco --name demo --version 1.0.0
+```
+
+把 `.arco` 放到客体可见的文件系统后，在管理员会话的终端执行
+`dev install /mnt/fat32/demo.arco`。内核先按受保护清单里的整份文件 SHA-256
+校验，再校验 ARCO1 头，然后才映射并调用 `arco_entry`；驱动拒绝 INIT 时不写
+任何持久状态。`dev drivers` 与 `dev query NAME` 查看状态与摘要，
+`dev remove NAME` 停用并移除。驱动只能使用装载器交给 `arco_entry` 的
+`ArkDriverHost` 函数表；表外没有用户指针、进程状态或页表入口。
+
+## 应用构建与安装
 
 在完整源码根目录执行，需要 x86-64 GCC/binutils 或配置交叉 Clang/LLD、Python 3 和 POSIX shell：
 

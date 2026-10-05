@@ -18,6 +18,7 @@
 #include "storage.h"
 #include "extfs.h"
 #include "net.h"
+#include "device.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -161,6 +162,15 @@ int64_t package_request(ArkPackageRequest *q) {
     (void)q;
     return -38;
 }
+/* The .arco loader is exercised against the real module in module_host_test;
+ * here it only has to prove the syscall boundary validates its request the
+ * same way every other service does. */
+static ArkDriverRequest last_driver_request;
+static int64_t driver_result;
+int64_t module_request(ArkDriverRequest *q) {
+    last_driver_request = *q;
+    return driver_result;
+}
 int64_t package_spawn(ArkSpawn *q) {
     (void)q;
     return -2;
@@ -206,8 +216,9 @@ ELF_STUB(reminders);
 uint64_t platform_ticks(void) {
     return 100;
 }
+static uint64_t now_ms = 1007;
 uint64_t platform_millis(void) {
-    return 1007;
+    return now_ms;
 }
 void platform_time(int *h, int *m, int *s) {
     *h = 12;
@@ -277,6 +288,33 @@ void gpu_cursor_set_shape(unsigned shape) {
 }
 void block_statistics(BlockStats *out) {
     memset(out, 0, sizeof *out);
+}
+/* Device model seams: unit 0 is the system volume, unit 1 a removable disk. */
+static BlockDevice device_disks[2];
+static unsigned device_reads, device_wakes;
+BlockDevice *block_device(unsigned id) {
+    return id < 2 ? &device_disks[id] : 0;
+}
+bool block_read(BlockDevice *d, uint64_t lba, uint32_t sectors, void *buffer) {
+    if (!d || !d->present || lba >= d->sectors || sectors > d->sectors - lba)
+        return false;
+    device_reads++;
+    memset(buffer, 0x5a, sectors * 512u);
+    return true;
+}
+bool block_write(BlockDevice *d, uint64_t lba, uint32_t sectors, const void *buffer) {
+    (void)buffer;
+    return d && d->present && lba < d->sectors && sectors <= d->sectors - lba;
+}
+bool block_flush(BlockDevice *d) {
+    return d && d->present;
+}
+const char *block_error(void) {
+    return "host block stub";
+}
+void process_wake(uint32_t target) {
+    device_wakes++;
+    (void)target;
 }
 const char *gpu_backend_name(void) {
     return "host GPU stub";
@@ -1063,6 +1101,171 @@ static void catalog_permissions(void) {
     puts("checked catalog identity, trusted consent, anti-spam denial, wrong UID, live "
          "FILES/NETWORK/ACTIVITY revocation, legacy migration and corrupt-record fail-closed");
 }
+static void device_boundaries(void) {
+    device_init();
+    memset(device_disks, 0, sizeof device_disks);
+    device_disks[0].present = true;
+    device_disks[0].sectors = 64;
+    device_disks[1].present = true;
+    device_disks[1].sectors = 32;
+    device_reads = device_wakes = 0;
+    now_ms = 1007;
+    /* Unit 0 is the ArkFS system volume, unit 1 a removable disk, index 2 a
+     * PCI network function: the three shapes the syscall must distinguish. */
+    ArkDeviceInfo info = {0};
+    info.class_id = ARK_DEV_CLASS_BLOCK;
+    info.bus = ARK_BUS_ISA;
+    info.flags = ARK_DEV_PRESENT | ARK_DEV_READABLE | ARK_DEV_SYSTEM_VOLUME;
+    info.state = ARK_DEV_STATE_OK;
+    info.blocks = 64;
+    strcopy(info.name, "System volume", sizeof info.name);
+    strcopy(info.driver, "ahci", sizeof info.driver);
+    CHECK(device_register(&info) == 0);
+    info.unit = 1;
+    info.flags =
+        ARK_DEV_PRESENT | ARK_DEV_READABLE | ARK_DEV_WRITABLE | ARK_DEV_REMOVABLE;
+    info.blocks = 32;
+    strcopy(info.name, "Removable disk", sizeof info.name);
+    CHECK(device_register(&info) == 1);
+    memset(&info, 0, sizeof info);
+    info.class_id = ARK_DEV_CLASS_NETWORK;
+    info.bus = ARK_BUS_PCI;
+    info.bdf = 0x300;
+    info.flags = ARK_DEV_PRESENT;
+    info.state = ARK_DEV_STATE_OK;
+    strcopy(info.name, "e1000", sizeof info.name);
+    strcopy(info.driver, "e1000", sizeof info.driver);
+    CHECK(device_register(&info) == 2);
+    CHECK(device_count() == 3);
+
+    /* SYS_DRIVER shares the same addressing rules: a bad pointer, a wrong
+     * length or an unmapped caller is refused before the loader is reached. */
+    ArkDriverRequest r = {.op = ARK_DRV_LIST};
+    CHECK(dispatch(ARK_SYS_DRIVER, 0, sizeof r) == -14);
+    CHECK(dispatch(ARK_SYS_DRIVER, REQUEST, sizeof r - 1) == -14);
+    permissions[1] = 1;
+    CHECK(dispatch(ARK_SYS_DRIVER, REQUEST, sizeof r) == -14);
+    permissions[1] = 3;
+    driver_result = -22;
+    memcpy(arena + (REQUEST - BASE), &r, sizeof r);
+    CHECK(dispatch(ARK_SYS_DRIVER, REQUEST, sizeof r) == driver_result);
+    CHECK(last_driver_request.op == ARK_DRV_LIST);
+    /* the reply is copied back even when the loader reports end-of-list */
+    driver_result = -2;
+    CHECK(dispatch(ARK_SYS_DRIVER, REQUEST, sizeof r) == -2);
+    CHECK(last_driver_request.op == ARK_DRV_LIST);
+
+    /* Request addressing is validated before any device logic runs. */
+    caller(1, ARK_CAP_SYSTEM);
+    ArkDeviceRequest d = {.op = ARK_DEV_ENUMERATE};
+    CHECK(dispatch(ARK_SYS_DEVICE, 0, sizeof d) == -14);
+    CHECK(dispatch(ARK_SYS_DEVICE, REQUEST, sizeof d - 1) == -14);
+    memcpy(arena + (REQUEST - BASE), &d, sizeof d);
+    permissions[1] = 1;
+    CHECK(dispatch(ARK_SYS_DEVICE, REQUEST, sizeof d) == -14);
+    permissions[1] = 3;
+
+    /* Inventory is public metadata in an active session: enumerate is dense,
+     * query is by stable index, and no capability is required for either. */
+    caller(2, 0);
+    CHECK(CALL(ARK_SYS_DEVICE, d) == 0);
+    CHECK(d.count == 3 && d.info.class_id == ARK_DEV_CLASS_BLOCK &&
+          (d.info.flags & ARK_DEV_SYSTEM_VOLUME));
+    d.index = 2;
+    CHECK(CALL(ARK_SYS_DEVICE, d) == 0 && d.info.class_id == ARK_DEV_CLASS_NETWORK);
+    d.index = 3;
+    CHECK(CALL(ARK_SYS_DEVICE, d) == -2);
+    d = (ArkDeviceRequest){.op = ARK_DEV_QUERY, .index = 1};
+    CHECK(CALL(ARK_SYS_DEVICE, d) == 0 && d.info.unit == 1 &&
+          (d.info.flags & ARK_DEV_REMOVABLE));
+    d.index = 9;
+    CHECK(CALL(ARK_SYS_DEVICE, d) == -22);
+    d = (ArkDeviceRequest){.op = ARK_DEV_STATS, .index = 2};
+    CHECK(CALL(ARK_SYS_DEVICE, d) == 0);
+    d = (ArkDeviceRequest){.op = 9};
+    CHECK(CALL(ARK_SYS_DEVICE, d) == -22);
+
+    /* READ needs the DEVICE capability and a bounded, verified destination. */
+    d = (ArkDeviceRequest){.op = ARK_DEV_READ,
+                           .index = 1,
+                           .buffer = PAYLOAD,
+                           .capacity = 512,
+                           .sectors = 1};
+    caller(2, ARK_CAP_FILES);
+    CHECK(CALL(ARK_SYS_DEVICE, d) == -1);
+    caller(2, ARK_CAP_DEVICE);
+    d.index = 2;
+    CHECK(CALL(ARK_SYS_DEVICE, d) == -22);           /* not a block device */
+    d.index = 0;
+    CHECK(CALL(ARK_SYS_DEVICE, d) == -5);            /* system volume refused */
+    CHECK(device_reads == 0);
+    d.index = 1;
+    d.sectors = 0;
+    CHECK(CALL(ARK_SYS_DEVICE, d) == -22);
+    d.sectors = ARK_DEV_READ_SECTORS + 1;
+    d.capacity = d.sectors * 512u;
+    CHECK(CALL(ARK_SYS_DEVICE, d) == -22);           /* burst cap exceeded */
+    d.sectors = 2;
+    d.capacity = 512;                                /* capacity must match */
+    CHECK(CALL(ARK_SYS_DEVICE, d) == -22);
+    d.capacity = 2 * 512u;
+    d.buffer = BASE - 512;                           /* below the user window */
+    CHECK(CALL(ARK_SYS_DEVICE, d) == -22);
+    d.buffer = PAYLOAD;
+    d.offset = 31;                                   /* 31 + 2 > 32 sectors */
+    CHECK(CALL(ARK_SYS_DEVICE, d) == -5);
+    CHECK(device_reads == 0);
+    d.offset = 0;
+    permissions[(PAYLOAD - BASE) / PAGE] = 1;        /* read-only destination */
+    CHECK(CALL(ARK_SYS_DEVICE, d) == -14);
+    CHECK(device_reads == 0);
+    permissions[(PAYLOAD - BASE) / PAGE] = 3;
+    CHECK(CALL(ARK_SYS_DEVICE, d) == 0);
+    CHECK(d.count == 2 && device_reads == 1);
+    CHECK(arena[PAYLOAD - BASE] == 0x5a && arena[PAYLOAD - BASE + 1023] == 0x5a);
+
+    /* The per-process read budget is enforced inside one 100ms window and
+     * covers every attempt that reaches the driver, not only completed reads:
+     * the two -5 rejections above already spent tokens. */
+    d.sectors = 1;
+    d.capacity = 512;
+    now_ms += ARK_DEVICE_READ_WINDOW_MS;             /* fresh window */
+    for (unsigned i = 0; i < ARK_DEVICE_READ_BURST; i++)
+        CHECK(CALL(ARK_SYS_DEVICE, d) == 0);
+    CHECK(CALL(ARK_SYS_DEVICE, d) == -16);           /* window spent */
+    now_ms += ARK_DEVICE_READ_WINDOW_MS;             /* next window frees it */
+    CHECK(CALL(ARK_SYS_DEVICE, d) == 0);
+
+    /* Enumerating arms the event bridge; an inventory change wakes the
+     * observer, and reading the inventory again clears the pending edge. */
+    CHECK(!device_pending(2));
+    unsigned wakes = device_wakes;
+    CHECK(device_notify(0));
+    CHECK(device_pending(2));
+    CHECK(device_wakes > wakes);
+    d = (ArkDeviceRequest){.op = ARK_DEV_QUERY, .index = 0};
+    CHECK(CALL(ARK_SYS_DEVICE, d) == 0);
+    CHECK(!device_pending(2));
+
+    /* CONTROL: REFRESH needs the DEVICE capability, FLUSH is system-only. */
+    d = (ArkDeviceRequest){.op = ARK_DEV_CONTROL, .index = 1, .control = ARK_DEVCTL_FLUSH};
+    caller(2, ARK_CAP_DEVICE);
+    CHECK(CALL(ARK_SYS_DEVICE, d) == -1);            /* FLUSH is system-only */
+    caller(1, ARK_CAP_SYSTEM);
+    CHECK(CALL(ARK_SYS_DEVICE, d) == 0);             /* writable external disk */
+    d.index = 0;
+    CHECK(CALL(ARK_SYS_DEVICE, d) == -5);            /* system volume is not writable */
+    d.index = 2;
+    CHECK(CALL(ARK_SYS_DEVICE, d) == -5);            /* network node cannot flush */
+    d = (ArkDeviceRequest){.op = ARK_DEV_CONTROL, .index = 1, .control = ARK_DEVCTL_REFRESH};
+    caller(2, 0);
+    CHECK(CALL(ARK_SYS_DEVICE, d) == -1);            /* no DEVICE capability */
+    caller(2, ARK_CAP_DEVICE);
+    CHECK(CALL(ARK_SYS_DEVICE, d) == 0 && (d.flags & ARK_DEV_REMOVABLE));
+    d.control = 9;
+    CHECK(CALL(ARK_SYS_DEVICE, d) == -22);
+    caller(1, ARK_CAP_SYSTEM);
+}
 int main(void) {
     memset(permissions, 3, sizeof permissions);
     vfs_init();
@@ -1074,6 +1277,7 @@ int main(void) {
     drag_and_input();
     network_boundaries();
     display_boundaries();
+    device_boundaries();
     catalog_permissions();
     session_gates();
     printf("Service boundary: %u checks, %u failures\n", checks, failures);
