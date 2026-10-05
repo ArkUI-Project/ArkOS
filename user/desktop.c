@@ -601,7 +601,7 @@ static bool child_of(const char *path, const char *dir) {
             return false;
     return true;
 }
-static int file_list[VFS_MAX_FILES + EXTFS_MAX_ENTRIES], file_count;
+static int file_list[VFS_EXT_BASE + EXTFS_MAX_ENTRIES], file_count;
 static uint64_t file_scanned_at;
 static char file_scanned_path[128];
 static void window_context(int w) {
@@ -677,11 +677,15 @@ static void refresh_files(void) {
     file_scanned_at = ark_ticks();
     strcopy(file_scanned_path, folder, 128);
     file_count = 0;
-    for (int pass = 0; pass < 2; pass++)
-        for (int i = 0; i < vfs_entry_limit(); i++)
-            if (vfs_entry(i) && (*vfs_entry(i)).used && (*vfs_entry(i)).is_dir == (pass == 0) &&
-                child_of((*vfs_entry(i)).name, folder))
-                file_list[file_count++] = i;
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < vfs_entry_limit(); i++) {
+            VFile *f = vfs_entry(i);
+            if (f && f->used && f->is_dir == (pass == 0) && child_of(f->name, folder)) {
+                if (file_count < (int)(sizeof file_list / sizeof file_list[0]))
+                    file_list[file_count++] = i;
+            }
+        }
+    }
     bool found = false;
     for (int i = 0; i < file_count; i++)
         if (file_list[i] == selected)

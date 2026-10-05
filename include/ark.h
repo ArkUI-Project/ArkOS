@@ -56,6 +56,12 @@ void strcopy(char *d, const char *s, size_t cap);
 void uint_to_str(uint64_t n, char *out);
 #define VFS_MAX_FILES 64
 #define VFS_FILE_CAP 16384
+#define VFS_PATH_MAX 1023
+#define VFS_V2_LIST_MAX 128
+#define VFS_EXT_BASE (VFS_MAX_FILES + VFS_V2_LIST_MAX)
+#ifndef ARK_FILE_SLOTS
+#define ARK_FILE_SLOTS 256u
+#endif
 typedef struct {
     bool used;
     bool is_dir;
@@ -63,7 +69,7 @@ typedef struct {
     char data[VFS_FILE_CAP];
     size_t size;
 } VFile;
-extern VFile vfs_files[VFS_MAX_FILES];
+extern VFile vfs_files[];
 void vfs_init(void);
 int vfs_find(const char *name);
 int vfs_create(const char *name);
@@ -71,6 +77,11 @@ bool vfs_write(int index, const char *text);
 bool vfs_store(const char *path, const void *data, uint64_t len);
 bool vfs_fetch(const char *path, void *data, uint64_t cap, uint64_t *out_len);
 bool vfs_remove(const char *name);
+bool vfs_path_canonical_cap(char *out, size_t cap, const char *path);
+VFile *vfs_entry(int index);
+int vfs_entry_limit(void);
+bool vfs_list(const char *directory);
+bool vfs_read(int index);
 #define SHELL_LINES 256
 #define SHELL_COLS 256
 typedef struct {

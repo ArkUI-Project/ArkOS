@@ -56,7 +56,7 @@ uint64_t platform_ticks(void) {
 }
 
 static void clear_ram(void) {
-    memset(vfs_files, 0, sizeof(vfs_files));
+    memset(vfs_files, 0, (sizeof(VFile) * VFS_MAX_FILES));
 }
 static int file(const char *path, const char *content) {
     int n = vfs_create(path);
@@ -65,7 +65,15 @@ static int file(const char *path, const char *content) {
 }
 static void expect(const char *path, const char *content) {
     int n = vfs_find(path);
-    assert(n >= 0 && !vfs_files[n].is_dir && !strcmp(vfs_files[n].data, content));
+    assert(n >= 0);
+    if (storage_is_v2()) {
+        char buf[VFS_FILE_CAP];
+        uint64_t got = 0;
+        assert(vfs_fetch(path, buf, sizeof buf, &got));
+        assert(got == strlen(content) && !memcmp(buf, content, (size_t)got));
+        return;
+    }
+    assert(!vfs_files[n].is_dir && !strcmp(vfs_files[n].data, content));
 }
 static void reboot(void) {
     clear_ram();
@@ -248,5 +256,83 @@ int main(int argc, char **argv) {
     assert(ro >= 0 && !vfs_write(ro, "nope"));
     assert(!strcmp(storage_error(), "当前文件只读"));
     puts("PASS: new ArkFS2 mounts, and files over 16KB round-trip");
+
+    memset(disk, 0, sizeof(disk));
+    assert(storage_format_new() && storage_is_v2());
+    assert(vfs_mkdir("/many"));
+    for (int i = 0; i < 65; ++i) {
+        char path[64];
+        snprintf(path, sizeof path, "/many/f-%02d.txt", i);
+        assert(vfs_store(path, "x", 1));
+    }
+    for (int i = 66; i < 70; ++i) {
+        char path[64];
+        snprintf(path, sizeof path, "/many/f-%02d.txt", i);
+        assert(vfs_store(path, "x", 1));
+    }
+    uint64_t free_before_65 = storage_free_bytes();
+    uint64_t used_before_65 = storage_used_bytes();
+    assert(vfs_store("/many/f-65.txt", "x", 1));
+    uint64_t free_with = storage_free_bytes();
+    assert(free_with < free_before_65);
+    assert(vfs_rename("/many/f-65.txt", "/many/renamed-65.txt"));
+    assert(vfs_find("/many/renamed-65.txt") >= 0);
+    assert(storage_free_bytes() == free_with);
+    assert(vfs_remove("/many/renamed-65.txt"));
+    assert(vfs_find("/many/renamed-65.txt") < 0);
+    assert(storage_used_bytes() == used_before_65);
+    assert(storage_free_bytes() == free_before_65);
+    assert(storage_sync());
+    reboot();
+    assert(storage_is_v2());
+    assert(vfs_list("/many"));
+    int visible = 0;
+    for (int i = 0; i < vfs_entry_limit(); ++i) {
+        VFile *f = vfs_entry(i);
+        if (f && f->used && !strncmp(f->name, "/many/", 6))
+            ++visible;
+    }
+    assert(visible >= 69);
+    for (int i = 66; i < 70; ++i) {
+        char path[64];
+        char buf[8];
+        uint64_t got = 0;
+        snprintf(path, sizeof path, "/many/f-%02d.txt", i);
+        assert(vfs_fetch(path, buf, sizeof buf, &got));
+        assert(got == 1 && buf[0] == 'x');
+    }
+    assert(vfs_find("/many/renamed-65.txt") < 0);
+    assert(vfs_find("/many/f-65.txt") < 0);
+    puts("PASS: v2 slot-free create, list, rename, delete, remount");
+
+    char comp255[256], comp256[257];
+    memset(comp255, 'a', 255); comp255[255] = 0;
+    memset(comp256, 'b', 256); comp256[256] = 0;
+    assert(vfs_mkdir("/lim"));
+    char p255[300];
+    snprintf(p255, sizeof p255, "/lim/%s", comp255);
+    assert(vfs_store(p255, "ok", 2));
+    char p256[300];
+    snprintf(p256, sizeof p256, "/lim/%s", comp256);
+    assert(!vfs_store(p256, "no", 2));
+    assert(!strcmp(storage_error(), "文件名过长"));
+    char a[256], b[256], c[256], d[256];
+    memset(a, 'a', 255); a[255] = 0;
+    memset(b, 'b', 255); b[255] = 0;
+    memset(c, 'c', 255); c[255] = 0;
+    memset(d, 'd', 254); d[254] = 0;
+    char dir1[300], dir2[600], dir3[900], longp[1200], longer[1200];
+    snprintf(dir1, sizeof dir1, "/%s", a);
+    snprintf(dir2, sizeof dir2, "%s/%s", dir1, b);
+    snprintf(dir3, sizeof dir3, "%s/%s", dir2, c);
+    assert(vfs_mkdir(dir1) && vfs_mkdir(dir2) && vfs_mkdir(dir3));
+    snprintf(longp, sizeof longp, "%s/%s", dir3, d);
+    assert(strlen(longp) == 1023);
+    assert(vfs_store(longp, "z", 1));
+    snprintf(longer, sizeof longer, "%s/%sx", dir3, d);
+    assert(strlen(longer) == 1024);
+    assert(!vfs_store(longer, "z", 1));
+    assert(!strcmp(storage_error(), "路径过长"));
+    puts("PASS: v2 name 255/256 and path 1023/1024 bounds");
     return 0;
 }
