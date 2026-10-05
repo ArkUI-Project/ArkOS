@@ -6,6 +6,10 @@
 #include "arkfs2_seal.h"
 #include <stddef.h>
 
+#ifndef ARK_STORAGE_HOST_TEST
+void serial_write(const char *s);
+#endif
+
 #define SECTOR 512u
 #define BLOCK 4096u
 #define JOURNAL_BLOCKS 4u
