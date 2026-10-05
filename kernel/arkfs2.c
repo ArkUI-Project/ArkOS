@@ -43,7 +43,7 @@ static uint64_t generation;
 static uint64_t used_live;
 static Arkfs2SealState seal_state;
 static Arkfs2CryptoHeader crypto_hdr;
-static bool crypto_present;
+static bool crypto_present, crypto_corrupt;
 static uint8_t bitmap_mem[MAX_BITMAP * BLOCK];
 static uint8_t committed_mem[MAX_BITMAP * BLOCK];
 static uint8_t quarantine_mem[MAX_BITMAP * BLOCK];
@@ -642,7 +642,7 @@ static bool write_bytes(Inode *ino, const uint8_t *data, uint64_t len) {
             if (n && data)
                 mem_copy(plain, (const uint8_t *)data + off, n);
             if ((seal_state.features & ARKFS2_FEAT_ENCRYPT) && !arkfs2_random_available()) {
-                last_error = "无法取得安全随机数";
+                last_error = "无法加密写入，未保存";
                 return false;
             }
             if (!arkfs2_seal_block(&seal_state, i, plain, n, raw)) {
@@ -928,17 +928,26 @@ static bool load_tree(const uint8_t *sec) {
     seal_state.features = get32(sec + 76);
     crypto_present = (seal_state.features & (ARKFS2_FEAT_ENCRYPT | ARKFS2_FEAT_COMPRESS)) != 0;
     seal_state.unlocked = !(seal_state.features & ARKFS2_FEAT_ENCRYPT);
+    crypto_corrupt = false;
     mem_set(seal_state.volume_key, 0, sizeof seal_state.volume_key);
     if (seal_state.features & ARKFS2_FEAT_ENCRYPT) {
         crypto_hdr.features = seal_state.features;
         crypto_hdr.kdf_iters = get32(sec + 80);
         if (!crypto_hdr.kdf_iters)
             crypto_hdr.kdf_iters = ARKFS2_KDF_ITERS_DEFAULT;
-        if (crypto_hdr.kdf_iters > ARKFS2_KDF_ITERS_MAX)
-            return false;
-        mem_copy(crypto_hdr.salt, sec + 84, ARKFS2_SALT_LEN);
-        mem_copy(crypto_hdr.wrap_nonce, sec + 100, ARKFS2_NONCE_LEN);
-        mem_copy(crypto_hdr.wrapped, sec + 112, ARKFS2_KEY_LEN + ARKFS2_TAG_LEN);
+        if (crypto_hdr.kdf_iters > ARKFS2_KDF_ITERS_MAX) {
+            crypto_corrupt = true;
+            last_error = "磁盘加密信息已损坏，无法解锁";
+            /* Mount metadata only; unlock card shows the message above (serial has detail). */
+#ifndef ARK_STORAGE_HOST_TEST
+            serial_write("[arkfs2] kdf_iters exceeds max; crypto header rejected\n");
+#endif
+        } else {
+            crypto_corrupt = false;
+            mem_copy(crypto_hdr.salt, sec + 84, ARKFS2_SALT_LEN);
+            mem_copy(crypto_hdr.wrap_nonce, sec + 100, ARKFS2_NONCE_LEN);
+            mem_copy(crypto_hdr.wrapped, sec + 112, ARKFS2_KEY_LEN + ARKFS2_TAG_LEN);
+        }
     }
     {
         IBlock *root = hold_iblock(0);
@@ -1176,6 +1185,7 @@ static bool format_with(Arkfs2Disk *volume, const Arkfs2FormatOptions *opt) {
     mem_set(&seal_state, 0, sizeof seal_state);
     mem_set(&crypto_hdr, 0, sizeof crypto_hdr);
     crypto_present = false;
+    crypto_corrupt = false;
     if (opt) {
         seal_state.features = opt->features & (ARKFS2_FEAT_ENCRYPT | ARKFS2_FEAT_COMPRESS);
         if (seal_state.features & ARKFS2_FEAT_ENCRYPT) {
@@ -1190,7 +1200,7 @@ static bool format_with(Arkfs2Disk *volume, const Arkfs2FormatOptions *opt) {
                 return false;
             }
             if (!arkfs2_random_available() || !arkfs2_random(crypto_hdr.salt, ARKFS2_SALT_LEN)) {
-                last_error = "无法取得安全随机数";
+                last_error = "无法加密写入，未保存";
                 return false;
             }
             uint8_t pass_key[ARKFS2_KEY_LEN], vol_key[ARKFS2_KEY_LEN];
@@ -1201,7 +1211,7 @@ static bool format_with(Arkfs2Disk *volume, const Arkfs2FormatOptions *opt) {
             if (!arkfs2_random(vol_key, ARKFS2_KEY_LEN) || !arkfs2_wrap_key(pass_key, vol_key, &crypto_hdr)) {
                 mem_set(pass_key, 0, sizeof pass_key);
                 mem_set(vol_key, 0, sizeof vol_key);
-                last_error = "无法取得安全随机数";
+                last_error = "无法加密写入，未保存";
                 return false;
             }
             mem_copy(seal_state.volume_key, vol_key, ARKFS2_KEY_LEN);
@@ -1238,6 +1248,10 @@ bool arkfs2_needs_unlock(void) {
 bool arkfs2_unlock(const char *passphrase) {
     if (!(seal_state.features & ARKFS2_FEAT_ENCRYPT))
         return true;
+    if (crypto_corrupt) {
+        last_error = "磁盘加密信息已损坏，无法解锁";
+        return false;
+    }
     if (!passphrase) {
         last_error = "口令错误";
         return false;

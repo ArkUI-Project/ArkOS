@@ -66,6 +66,12 @@ static bool fake_random(void *buf, size_t n) {
 static uint32_t disk_crc(void) {
     return crc32(img, (size_t)sectors * 512);
 }
+static void fill_noise(uint8_t *p, size_t n, uint64_t seed) {
+    for (size_t i = 0; i < n; ++i) {
+        seed = seed * 6364136223846793005ull + 1ull;
+        p[i] = (uint8_t)(seed >> 33);
+    }
+}
 static void copy_nonce(uint32_t block_id, uint8_t out[12]) {
     memcpy(out, img + (uint64_t)block_id * 4096 + 5, 12);
 }
@@ -334,7 +340,7 @@ int main(void) {
     {
         Arkfs2FormatOptions bad = {.features = ARKFS2_FEAT_ENCRYPT, .kdf_iters = 1000, .passphrase = "x"};
         open_disk(4);
-        check(!arkfs2_format_ex(&disk, &bad) && strcmp(arkfs2_error(), "无法取得安全随机数") == 0,
+        check(!arkfs2_format_ex(&disk, &bad) && strcmp(arkfs2_error(), "无法加密写入，未保存") == 0,
               "encrypt format needs random");
         close_disk();
     }
@@ -403,7 +409,7 @@ int main(void) {
     check(memcmp(nonce1, nonce2, 12) != 0, "nonce changes on rewrite");
     close_disk();
 
-    /* kdf_iters over max rejects mount */
+    /* kdf_iters over max: mount metadata, unlock shows corrupt string */
     open_disk(4);
     rng = 7;
     {
@@ -413,10 +419,16 @@ int main(void) {
     arkfs2_unmount();
     put32(img + 80, 0xffffffffu);
     rewrite_sb_crc();
-    check(!arkfs2_mount(&disk), "kdf max rejects mount");
+    check(arkfs2_mount(&disk), "kdf max still mounts");
+    check(arkfs2_needs_unlock(), "kdf max needs unlock");
+    check(strcmp(arkfs2_error(), "磁盘加密信息已损坏，无法解锁") == 0, "kdf max mount error");
+    check(!arkfs2_unlock("k") && strcmp(arkfs2_error(), "磁盘加密信息已损坏，无法解锁") == 0,
+          "kdf max unlock string");
+    check(!arkfs2_unlock("wrong") && strcmp(arkfs2_error(), "磁盘加密信息已损坏，无法解锁") == 0,
+          "kdf max not 口令错误");
     close_disk();
 
-    /* compress-only: wide file + fill */
+    /* compress-only: incompressible, mixed across block boundary, 1MB fill */
     open_disk(16);
     rng = 9;
     {
@@ -424,13 +436,25 @@ int main(void) {
         check(arkfs2_format_ex(&disk, &opt), "format compress");
     }
     {
-        char wide[20000];
-        memset(wide, 0x5a, sizeof wide);
-        check(arkfs2_write("/wide", wide, sizeof wide), "compress over 16KB");
-        char *gotw = malloc(sizeof wide);
-        check(arkfs2_read("/wide", gotw, sizeof wide, &n) && n == sizeof wide && memcmp(gotw, wide, sizeof wide) == 0,
-              "compress wide read");
-        free(gotw);
+        uint8_t *noise = malloc(20000);
+        fill_noise(noise, 20000, 0xC0FFEE);
+        check(arkfs2_write("/noise", noise, 20000), "compress incompressible");
+        uint8_t *gotn = malloc(20000);
+        check(arkfs2_read("/noise", gotn, 20000, &n) && n == 20000 && memcmp(gotn, noise, 20000) == 0,
+              "compress noise read");
+        free(gotn);
+        free(noise);
+
+        /* half compressible, half noise; 8000 bytes spans >2 sealed payloads (~4063) */
+        uint8_t *mixed = malloc(8000);
+        memset(mixed, 'A', 4000);
+        fill_noise(mixed + 4000, 4000, 0xBADC0DE);
+        check(arkfs2_write("/mixed", mixed, 8000), "compress mixed");
+        uint8_t *gotm = malloc(8000);
+        check(arkfs2_read("/mixed", gotm, 8000, &n) && n == 8000 && memcmp(gotm, mixed, 8000) == 0,
+              "compress mixed read");
+        free(gotm);
+        free(mixed);
     }
     close_disk();
     open_disk(1);
@@ -439,25 +463,17 @@ int main(void) {
         check(arkfs2_format_ex(&disk, &opt), "format compress 1mb");
     }
     {
-        int stopped = 0;
-        for (int i = 0; i < 400; ++i) {
-            char path[32];
-            snprintf(path, sizeof path, "/f%04d", i);
-            uint64_t before = arkfs2_free_bytes();
-            if (!arkfs2_write(path, "z", 1)) {
-                check(strcmp(arkfs2_error(), "空间不足，未保存") == 0, "compress out of blocks");
-                check(arkfs2_free_bytes() == before, "compress free unchanged");
-                stopped = 1;
-                break;
-            }
-        }
-        check(stopped, "compress 1mb fills");
-        uint8_t onez[4];
-        check(arkfs2_read("/f0000", onez, sizeof onez, &n) && n == 1 && onez[0] == 'z', "compress first remains");
+        uint8_t *one = malloc(1024u * 1024u);
+        fill_noise(one, 1024u * 1024u, 0xF111);
+        uint64_t before = arkfs2_free_bytes();
+        check(!arkfs2_write("/fill", one, 1024u * 1024u) && strcmp(arkfs2_error(), "空间不足，未保存") == 0,
+              "compress fill 1mb");
+        check(arkfs2_free_bytes() == before, "compress free unchanged after fill");
+        free(one);
     }
     close_disk();
 
-    /* encrypt+compress: wide + fill */
+    /* encrypt+compress: same incompressible / mixed / fill */
     open_disk(16);
     rng = 11;
     {
@@ -466,19 +482,35 @@ int main(void) {
         check(arkfs2_format_ex(&disk, &opt), "format both");
     }
     {
-        char wide[20000];
-        memset(wide, 'Q', sizeof wide);
-        check(arkfs2_write("/wide", wide, sizeof wide), "both over 16KB");
-        char *gotw = malloc(sizeof wide);
-        check(arkfs2_read("/wide", gotw, sizeof wide, &n) && n == sizeof wide && memcmp(gotw, wide, sizeof wide) == 0,
-              "both wide read");
-        free(gotw);
+        uint8_t *noise = malloc(20000);
+        fill_noise(noise, 20000, 0xA11);
+        check(arkfs2_write("/noise", noise, 20000), "both incompressible");
+        uint8_t *gotn = malloc(20000);
+        check(arkfs2_read("/noise", gotn, 20000, &n) && n == 20000 && memcmp(gotn, noise, 20000) == 0,
+              "both noise read");
+        free(gotn);
+
+        uint8_t *mixed = malloc(8000);
+        memset(mixed, 'B', 4000);
+        fill_noise(mixed + 4000, 4000, 0xB22);
+        check(arkfs2_write("/mixed", mixed, 8000), "both mixed");
+        uint8_t *gotm = malloc(8000);
+        check(arkfs2_read("/mixed", gotm, 8000, &n) && n == 8000 && memcmp(gotm, mixed, 8000) == 0,
+              "both mixed read");
+        free(gotm);
+
         arkfs2_unmount();
         check(arkfs2_mount(&disk) && arkfs2_unlock("both"), "both remount");
-        gotw = malloc(sizeof wide);
-        check(arkfs2_read("/wide", gotw, sizeof wide, &n) && n == sizeof wide && memcmp(gotw, wide, sizeof wide) == 0,
-              "both wide after unlock");
-        free(gotw);
+        gotn = malloc(20000);
+        check(arkfs2_read("/noise", gotn, 20000, &n) && n == 20000 && memcmp(gotn, noise, 20000) == 0,
+              "both noise after unlock");
+        free(gotn);
+        free(noise);
+        gotm = malloc(8000);
+        check(arkfs2_read("/mixed", gotm, 8000, &n) && n == 8000 && memcmp(gotm, mixed, 8000) == 0,
+              "both mixed after unlock");
+        free(gotm);
+        free(mixed);
     }
     close_disk();
     open_disk(1);
@@ -489,19 +521,13 @@ int main(void) {
         check(arkfs2_format_ex(&disk, &opt), "format both 1mb");
     }
     {
-        int stopped = 0;
-        for (int i = 0; i < 400; ++i) {
-            char path[32];
-            snprintf(path, sizeof path, "/f%04d", i);
-            uint64_t before = arkfs2_free_bytes();
-            if (!arkfs2_write(path, "z", 1)) {
-                check(strcmp(arkfs2_error(), "空间不足，未保存") == 0, "both out of blocks");
-                check(arkfs2_free_bytes() == before, "both free unchanged");
-                stopped = 1;
-                break;
-            }
-        }
-        check(stopped, "both 1mb fills");
+        uint8_t *one = malloc(1024u * 1024u);
+        fill_noise(one, 1024u * 1024u, 0xE33);
+        uint64_t before = arkfs2_free_bytes();
+        check(!arkfs2_write("/fill", one, 1024u * 1024u) && strcmp(arkfs2_error(), "空间不足，未保存") == 0,
+              "both fill 1mb");
+        check(arkfs2_free_bytes() == before, "both free unchanged after fill");
+        free(one);
     }
     close_disk();
     arkfs2_set_random_hook(0);
