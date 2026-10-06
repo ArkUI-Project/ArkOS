@@ -42,6 +42,7 @@ TLS 使用 MIT 许可的 BearSSL 0.6，字体轮廓光栅使用 stb_truetype 1.2
 
 ```sh
 make check check-security-host check-package-host check-v7-host check-v8-host
+make check-arkfs2 check-arkfs2-seal check-device-host check-module-host check-ioapic-host check-msi-host
 python3 tests/interaction_013_test.py bios
 python3 tests/interaction_013_test.py uefi
 python3 tests/lifecycle_013_test.py bios
@@ -52,6 +53,8 @@ python3 tests/install_013_test.py bios
 python3 tests/install_013_test.py uefi
 python3 tests/package_count_vm_test.py
 python3 tests/tls_vm_test.py
+python3 tests/ioapic_vm_test.py
+python3 tests/nvme_vm_test.py
 make check-wasm-host
 python3 tests/v9_wasm_test.py bios
 python3 tests/v9_wasm_test.py uefi

@@ -93,9 +93,10 @@ dev drivers            # 已安装的可加载驱动
 dev query demo         # 名称、状态、字节数与整份文件 SHA-256
 dev install /mnt/fat32/demo.arco   # 需要管理员
 dev remove demo                    # 需要管理员
+dev blk 1 read 0 1     # 块单元 1 从 LBA 0 起读 1 个扇区（write 仅 SYSTEM）
 ```
 
-桌面"系统设置"的设备页只列出驱动状态与它注册的设备索引，不提供安装按钮：安装需要读取本地 `.arco` 文件并确认管理员身份，目前只在终端里完成。块设备原始读取面向应用而非 Shell：`ARK_SYS_DEVICE` 的 READ 需要应用自身获得 DEVICE 能力，Shell 没有这个能力，所以不提供 `dev read`。
+桌面"系统设置"的设备页只列出驱动状态与它注册的设备索引，不提供安装按钮：安装需要读取本地 `.arco` 文件并确认管理员身份，目前只在终端里完成。块设备原始访问由 `dev blk UNIT read|write LBA COUNT` 提供：Shell 作为 SYSTEM 调用者满足 DEVICE 能力检查，内核在搬运前校验节点、区间并排除 ArkFS 系统卷，`write` 仅对 SYSTEM 开放；普通应用仍需自己获得 DEVICE 能力才能调用 `ARK_DEV_READ`。
 
 ## 已知限制
 

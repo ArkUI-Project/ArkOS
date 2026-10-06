@@ -31,11 +31,14 @@ macOS 可使用 x86-64 freestanding 交叉 Clang/LLD，并通过 `CC`、`LD`
 ```sh
 make check
 make check-security-host check-package-host check-v7-host check-v8-host
-make check-device-host check-module-host check-registry-host
+make check-arkfs2 check-arkfs2-seal
+make check-device-host check-module-host check-ioapic-host check-msi-host check-registry-host
 make check-wasm-host
 OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd make check-runtime
 python3 tests/arco_vm_test.py bios
 OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd python3 tests/arco_vm_test.py uefi
+python3 tests/ioapic_vm_test.py
+python3 tests/nvme_vm_test.py
 python3 tests/spice_mouse_vm_test.py bios
 OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd python3 tests/spice_mouse_vm_test.py uefi
 make arm64
@@ -47,7 +50,8 @@ ntfs-3g 的格式化工具。持久化检查会复用该测试自己的盘。
 
 历史版本测试要求相应 ISO、SDK 包或诊断载荷；实际执行日志、载荷摘要
 与结果写入各自的 `build/test-*` 目录。当前 GitHub Actions 配置验证 x86 构建、
-主机边界、独立文件系统夹具、客体运行和 BIOS/UEFI 原生鼠标输入，
+主机边界（含设备模型、可加载模块、IOAPIC 与 MSI-X）、独立文件系统夹具、
+客体 IOAPIC 与 MSI-X/NVMe 冒烟门和 BIOS/UEFI 原生鼠标输入，
 ARM64 步骤只检查串口开发目标编译。
 
 ## 变更与发布
