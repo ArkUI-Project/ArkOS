@@ -43,14 +43,14 @@ RAM 模式仍可使用文件应用，但更改无法跨重启保存。内核不�
 
 ## 支持范围与容量
 
-- Primary IDE master，传统 I/O 端口 `0x1F0–0x1F7` / `0x3F6`。
-- IDENTIFY、LBA28 READ SECTORS、WRITE SECTORS、FLUSH CACHE；512 字节逻辑扇区。
-- PIO 轮询，最多 255 扇区一批；ATA 错误、设备故障及超时会中止同步。
+- 数据盘经块层访问：有 AHCI 控制器与磁盘时优先内置 AHCI（`kernel/ahci.c`），否则回退 Primary IDE master 的传统 I/O 端口 `0x1F0–0x1F7` / `0x3F6`。
+- 回退路径使用 IDENTIFY、LBA28 READ SECTORS、WRITE SECTORS、FLUSH CACHE；512 字节逻辑扇区。
+- 回退路径为 PIO 轮询，最多 255 扇区一批；ATA 错误、设备故障及超时会中止同步。
 - ArkFS v1：64 个文件或目录条目，目录与根目录也占条目；每个文本文件最多 16383 字节；完整绝对路径最多 127 个 UTF-8 字节。
 - ArkFS v2：条目数与单文件大小只受空闲块限制；路径分量最多 255 字节，完整路径最多 1023 字节（含前导 `/`）。桌面／syscall 路径缓冲仍为 127 字节时，长路径会显示英文 `Path exceeds 127 UTF-8 bytes`（已知差异）。
 - 支持目录、文件读写、文件复制、文件/目录子树重命名、空目录删除。
 - 不允许删除根目录、删除非空目录、把目录移入自身，或在不存在的父目录创建。
-- 不实现二进制文件、符号链接、权限、分区表、AHCI、NVMe、USB 存储或热插拔。
+- 此 ArkFS 存储层不实现二进制文件、符号链接、权限或分区表；设备传输由块层提供（优先内置 AHCI，回退 ATA PIO），可加载 NVMe `.arco` 驱动见 [DRIVERS.md](DRIVERS.md)，USB 存储与热插拔未实现。
 
 `storage_capacity_bytes()` 返回逻辑理论上限 **1048512 字节**（64 × 16383）；
 `storage_used_bytes()` 返回所有普通文件正文之和。目录占用条目，所以实际可用

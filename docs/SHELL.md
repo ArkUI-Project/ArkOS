@@ -1,6 +1,6 @@
 # ArkOS 原生终端
 
-ArkOS 0.7 的终端是运行在受信任桌面 Ring3 进程中的原生命令解释器，文件、任务和设备请求经过自研内核系统调用。系统支持独立ELF进程与原生线程，但终端不是Bash或Linux/POSIX环境，不能运行Linux软件、包管理器、Python、Node.js或SSH。
+ArkOS 的终端是运行在受信任桌面 Ring3 进程中的原生命令解释器，文件、任务和设备请求经过自研内核系统调用。系统支持独立ELF进程与原生线程，但终端不是Bash或Linux/POSIX环境，不能运行Linux软件、包管理器、Python、Node.js或SSH。
 
 终端输出使用UTF-8，保留中文路径、文件内容和命令参数。原生拼音目前接入笔记编辑器，尚未接入终端输入框。
 
@@ -62,6 +62,7 @@ sync
 | `uptime` | 显示开机经过时间 |
 | `date` | 显示 RTC 时钟；未实现年月日和时区转换 |
 | `open files\|notes\|settings\|about` | 打开对应桌面应用 |
+| `dev [子命令]` | 设备清单、可加载 `.arco` 驱动与受界限块读写；子命令、权限与限制见 [DRIVERS.md](DRIVERS.md) |
 | `reboot` / `shutdown` | 同步已挂载磁盘，然后请求重启／关机 |
 
 `cat`、`head`、`tail`、`grep`、`wc` 在未指定文件时读取前一个管线阶段的文本。没有管线输入时视为空文本，不会阻塞等待键盘。`wc -l` 统计换行符；最后一行若没有换行符，不计入换行数。
@@ -158,3 +159,18 @@ sync
 | `open browser\|tasks\|capture\|installer\|todo\|timer` | 打开对应内置工具 |
 
 `sort`/`uniq`未给文件时读取管线文本，例如`cat names.txt | sort | uniq`。所有工具仍受文本文件16383字节的写入上限约束。测试中的网络服务器仅提供普通HTTP响应，不参与浏览器渲染、输入法、截图或磁盘操作。
+
+## 设备与驱动命令（0.13）
+
+`dev` 查询设备模型与可加载 `.arco` 驱动，并在受界限范围内做一次真实块传输：
+
+| 子命令 | 行为与边界 |
+|---|---|
+| `dev` / `dev list` | 列出内核设备节点：类、状态与 detail；只需活动会话 |
+| `dev drivers` | 列出已安装驱动、版本、状态与 MSI-X 绑定/ISR 计数 |
+| `dev query NAME` | 名称、状态、字节数与整份文件 SHA-256 |
+| `dev install PATH.arco\|blob:NAME` | 需要管理员：按整份文件哈希校验后装载 |
+| `dev remove NAME` | 需要管理员：DEINIT、节点置 ABSENT、释放槽位与向量 |
+| `dev blk UNIT read\|write LBA COUNT` | 对块单元做一次受校验传输；UNIT 0–1，COUNT ≤ 128（64 KiB），LBA 为 512 字节扇区 |
+
+`dev blk` 是系统诊断入口：Shell 作为 SYSTEM 调用者满足 DEVICE 能力检查，内核在搬运任何扇区前校验节点、区间并排除 ArkFS 系统卷；`write` 仅对 SYSTEM 开放，不会写入正在运行的系统盘。普通应用需要自己获得 DEVICE 能力才能用 `ARK_DEV_READ`。驱动格式、信任模型与限制见 [DRIVERS.md](DRIVERS.md)。
