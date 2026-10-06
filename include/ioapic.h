@@ -8,7 +8,8 @@
  * IDT vectors stay 32 + line, the same as the legacy PIC remap. Without an
  * IOAPIC (or without a usable BSP LAPIC) platform.c keeps the 8259 path.
  * VT-d interrupt remapping is not used: RTEs are compatibility format with a
- * physical 8-bit destination (the BSP). MSI/MSI-X and ACPI _PRT are TODO. */
+ * physical 8-bit destination (the BSP). MSI/MSI-X delivery is implemented
+ * separately (include/msi.h); ACPI _PRT is still TODO. */
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -56,6 +57,9 @@ void ioapic_release(unsigned irq);
 void ioapic_mask(unsigned irq);
 void ioapic_unmask(unsigned irq);
 void ioapic_eoi(void);
+/* MSI/MSI-X delivery target: the BSP LAPIC id when the LAPIC is up and MSI can
+ * be delivered. false when the platform fell back to the 8259 path. */
+bool ioapic_lapic_destination(uint32_t *id);
 /* Serial dump of every unmasked RTE plus leftover / duplicate checks.
  * Returns the number of active RTEs. */
 unsigned ioapic_dump(const char *reason);

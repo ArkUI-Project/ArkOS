@@ -22,6 +22,7 @@
 #include "storage.h"
 #include "pci.h"
 #include "module.h"
+#include "msi.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -914,6 +915,47 @@ static void test_host_table(void) {
     module_test_set_loading(-1);
     host->block_detach(); /* outside a window: no-op */
     CHECK(module_test_block(0) == 1);     /* still bound to slot 0 */
+    /* MSI-X: the host validates the arguments and window, then hands the
+     * request to msi.c. Each attach gets its own vector; release is per owner
+     * and a stale binding is dropped instead of reaching dead code. */
+    unsigned msi_events0 = 0, msi_releases0 = 0;
+    CHECK(module_test_msi(&msi_events0, &msi_releases0) == 0);
+    uint32_t msi_vec = 0;
+    CHECK(host->msi_attach(0x1800, stub_poll, &msi_vec) == -22); /* no window */
+    module_test_set_loading(0);
+    CHECK(host->msi_attach(0x1800, 0, &msi_vec) == -22);
+    CHECK(host->msi_attach(0x1800, stub_poll, 0) == -22);
+    CHECK(host->msi_attach(0x1800, stub_poll, &msi_vec) == 0);
+    CHECK(msi_vec == 0x40);
+    CHECK(msi_vector_owner(msi_vec) == 0);
+    CHECK(module_test_msi(0, 0) == 1);
+    /* slot 0 never finished loading: dispatch releases the vector. */
+    CHECK(module_msi_dispatch(msi_vec) == 0);
+    CHECK(module_test_msi(0, 0) == 0);
+    unsigned msi_events1 = 0, msi_releases1 = 0;
+    module_test_msi(&msi_events1, &msi_releases1);
+    CHECK(msi_releases1 > msi_releases0);
+    /* two functions get distinct vectors; detach frees them all. */
+    uint32_t msi_vec2 = 0;
+    CHECK(host->msi_attach(0x1800, stub_poll, &msi_vec) == 0);
+    CHECK(host->msi_attach(0x1900, stub_poll, &msi_vec2) == 0);
+    CHECK(msi_vec != msi_vec2);
+    CHECK(module_test_msi(0, 0) == 2);
+    host->msi_detach();
+    CHECK(module_test_msi(0, 0) == 0);
+    /* exhaustion fails visibly rather than aliasing a live vector. */
+    uint32_t v = 0;
+    for (unsigned i = 0; i < 4; i++)
+        CHECK(host->msi_attach(0x2000 + i * 0x100, stub_poll, &v) == 0);
+    CHECK(host->msi_attach(0x2400, stub_poll, &v) == -16);
+    host->msi_detach();
+    CHECK(module_test_msi(0, 0) == 0);
+    /* a platform that cannot deliver MSI fails visibly. */
+    module_test_msi_fail(-19);
+    CHECK(host->msi_attach(0x1800, stub_poll, &v) == -19);
+    module_test_msi_fail(0);
+    module_test_set_loading(-1);
+    host->msi_detach(); /* outside a window: no-op */
     /* counters and state against a missing node */
     CHECK(host->device_add_counters(9999, 1, 1, 1, 1) == -22);
     CHECK(host->device_set_state(9999, ARK_DEV_PRESENT, ARK_DEV_STATE_OK) == -22);

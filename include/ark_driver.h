@@ -117,13 +117,24 @@ typedef struct {
      * pin returns -19. Callable only from arco_entry; removal releases the
      * RTE / masks the PIC line. Drivers that cannot attach must not claim
      * interrupt success — poll-only cannot pass the IOAPIC smoke gate.
-     * MSI/MSI-X is still TODO. */
+     * MSI/MSI-X functions use msi_attach instead of a legacy line. */
     int (*irq_attach)(uint32_t irq, void (*isr)(void));
     /* block_attach binds one ArkBlockOps as a machine disk (one module disk at
      * a time; -16 when already bound). Callable only from arco_entry. */
     int (*block_attach)(const void *ops);
     void (*block_detach)(void);
-    uint32_t reserved[3];                   /* zero; future entries appended here */
+    /* msi_attach allocates one MSI-X vector for the calling module and programs
+     * the function's MSI-X table entry (bdf from pci_find/pci_device); the
+     * kernel owns the capability, so the driver never writes the table itself.
+     * isr must live in this module's RX code window and runs in interrupt
+     * context on the module stack like irq_attach. Returns 0 and the IDT
+     * vector, or -12 no MMIO mapping, -16 no free vector / table entry, -19 no
+     * usable MSI-X capability, BAR or LAPIC, -22 bad argument. Callable only
+     * from arco_entry; module removal masks and releases every vector. */
+    int (*msi_attach)(uint32_t bdf, void (*isr)(void), uint32_t *vector_out);
+    /* msi_detach masks and frees this module's MSI-X vectors. */
+    void (*msi_detach)(void);
+    uint32_t reserved[1];                   /* zero; future entries appended here */
 } ArkDriverHost;
 
 /* Entry point every .arco image exports (symbol arco_entry). op is

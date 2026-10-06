@@ -93,6 +93,10 @@ check-module-host: | build
 check-ioapic-host: | build
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -Iinclude tests/ioapic_host_test.c -o build/ioapic-host-test
 	./build/ioapic-host-test
+.PHONY: check-msi-host
+check-msi-host: | build
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -Iinclude tests/msi_host_test.c -o build/msi-host-test
+	./build/msi-host-test
 check-protection: iso
 	ARK_SMP_TEST=1 python3 tests/process_test.py
 	python3 tests/process_api_test.py

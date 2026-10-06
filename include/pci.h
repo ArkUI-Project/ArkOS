@@ -19,6 +19,7 @@ const PciDevice *pci_device(unsigned index);
 uint32_t pci_read(uint32_t bdf, unsigned offset);
 uint8_t pci_read8(uint32_t bdf, unsigned offset);
 void pci_write16(uint32_t bdf, unsigned offset, uint16_t value);
+void pci_write32(uint32_t bdf, unsigned offset, uint32_t value);
 /* OR bits into the command register: memory space, bus mastering, INTx disable. */
 void pci_command(uint32_t bdf, uint16_t bits);
 

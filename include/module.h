@@ -13,6 +13,10 @@ const char *module_error(void);
  * bound to irq (0..15) on the module stack and counts it; 1 when a handler
  * ran, 0 when the line has no module owner. */
 int module_irq_dispatch(unsigned irq);
+/* MSI/MSI-X vector dispatch: runs the module ISR bound to an allocated vector
+ * on the module stack and counts it; 1 when a handler ran, 0 when the vector
+ * is unowned or its module is no longer LOADED. */
+int module_msi_dispatch(unsigned vector);
 
 /* Host-test view of one slot. The loader's internal state stays private; the
  * harness asserts on decisions (state, mapped bytes, registered devices). */
@@ -50,6 +54,10 @@ void module_test_route_fail(int rc);
 /* Stateful block-bind stub: returns 1 while a module disk is bound and reports
  * its owner, so the harness can assert bind/refuse/release through the host. */
 unsigned module_test_block(unsigned *owner);
+/* Stateful MSI stub: live vector count plus cumulative attach/release events;
+ * msi_fail forces msi_attach to return rc. */
+unsigned module_test_msi(unsigned *events, unsigned *releases);
+void module_test_msi_fail(int rc);
 #endif
 
 #endif

@@ -35,6 +35,7 @@
 #include "blob.h"
 #include "net.h"
 #include "block.h"
+#include "msi.h"
 extern bool vfs_path_canonical(char out[128], const char *path);
 
 #define MODULE_PML4_INDEX 1u
@@ -505,6 +506,12 @@ static void module_irq_release(unsigned slot) {
             irq_fn[i] = 0;
         }
 }
+/* MSI-X vectors record their owning slot in msi.c, so releasing a module's
+ * interrupts is a single call. Masks each device entry before the vector is
+ * reusable, so no ISR can run while the module is torn down. */
+static void module_msi_release(unsigned slot) {
+    msi_release((int)slot);
+}
 static void irq_attach_log(uint32_t irq, int rc, const char *why) {
     char text[160], n[24];
     strcopy(text, "[irq] ", sizeof text);
@@ -590,6 +597,23 @@ int module_irq_dispatch(unsigned irq) {
         return 0;
     }
     irq_count[irq]++;
+    module_stack_call(m->stack_top, (void *)fn, 0, 0);
+    return 1;
+}
+/* MSI/MSI-X counterpart of module_irq_dispatch. Same stale-binding rule: a
+ * vector whose module is mid-teardown is released instead of reaching code
+ * that may already be gone. */
+int module_msi_dispatch(unsigned vector) {
+    int slot = msi_vector_owner(vector);
+    if (slot < 0)
+        return 0;
+    Module *m = &modules[slot];
+    void (*fn)(void) = msi_vector_isr(vector);
+    if (!m->used || m->state != ARK_DRV_STATE_LOADED || !fn) {
+        msi_release(slot);
+        return 0;
+    }
+    msi_vector_note(vector);
     module_stack_call(m->stack_top, (void *)fn, 0, 0);
     return 1;
 }
@@ -690,6 +714,97 @@ unsigned module_test_block(unsigned *owner) {
         *owner = test_disk_bound ? test_disk_owner : 0;
     return test_disk_bound ? 1u : 0u;
 }
+/* No PCI or MSI-X in the harness: a small stateful vector table stands in for
+ * kernel/msi.c so the attach/refuse/release contract is observable through
+ * host->msi_attach and module_msi_dispatch. */
+#define TEST_MSI_VECTORS 4u
+#define TEST_MSI_FIRST 0x40u
+static uint8_t test_msi_used[TEST_MSI_VECTORS];
+static uint32_t test_msi_bdf[TEST_MSI_VECTORS];
+static uint8_t test_msi_owner[TEST_MSI_VECTORS];
+static void (*test_msi_isr[TEST_MSI_VECTORS])(void);
+static uint64_t test_msi_count[TEST_MSI_VECTORS];
+static unsigned test_msi_events, test_msi_release_events;
+static int test_msi_fail;
+int msi_attach(uint32_t bdf, void (*isr)(void), int owner, uint32_t *vector_out) {
+    if (!isr || !vector_out)
+        return -22;
+    if (test_msi_fail)
+        return test_msi_fail;
+    for (unsigned i = 0; i < TEST_MSI_VECTORS; i++)
+        if (!test_msi_used[i]) {
+            test_msi_used[i] = 1;
+            test_msi_bdf[i] = bdf;
+            test_msi_owner[i] = (uint8_t)owner;
+            test_msi_isr[i] = isr;
+            test_msi_count[i] = 0;
+            *vector_out = TEST_MSI_FIRST + i;
+            test_msi_events++;
+            return 0;
+        }
+    return -16;
+}
+void msi_release(int owner) {
+    for (unsigned i = 0; i < TEST_MSI_VECTORS; i++)
+        if (test_msi_used[i] && test_msi_owner[i] == (uint8_t)owner) {
+            test_msi_used[i] = 0;
+            test_msi_isr[i] = 0;
+            test_msi_count[i] = 0;
+            test_msi_release_events++;
+        }
+}
+bool msi_is_vector(unsigned vector) {
+    return vector >= TEST_MSI_FIRST && vector < TEST_MSI_FIRST + TEST_MSI_VECTORS;
+}
+int msi_vector_owner(unsigned vector) {
+    if (!msi_is_vector(vector))
+        return -1;
+    unsigned i = vector - TEST_MSI_FIRST;
+    return test_msi_used[i] ? test_msi_owner[i] : -1;
+}
+void (*msi_vector_isr(unsigned vector))(void) {
+    if (!msi_is_vector(vector))
+        return 0;
+    return test_msi_isr[vector - TEST_MSI_FIRST];
+}
+void msi_vector_note(unsigned vector) {
+    if (msi_is_vector(vector))
+        test_msi_count[vector - TEST_MSI_FIRST]++;
+}
+bool msi_owner_vector_at(int owner, unsigned index, unsigned *vector, uint64_t *count) {
+    for (unsigned i = 0; i < TEST_MSI_VECTORS; i++) {
+        if (!test_msi_used[i] || test_msi_owner[i] != (uint8_t)owner)
+            continue;
+        if (index--)
+            continue;
+        if (vector)
+            *vector = TEST_MSI_FIRST + i;
+        if (count)
+            *count = test_msi_count[i];
+        return true;
+    }
+    return false;
+}
+unsigned msi_owner_vectors(int owner) {
+    unsigned n = 0;
+    for (unsigned i = 0; i < TEST_MSI_VECTORS; i++)
+        if (test_msi_used[i] && test_msi_owner[i] == (uint8_t)owner)
+            n++;
+    return n;
+}
+void module_test_msi_fail(int rc) {
+    test_msi_fail = rc;
+}
+unsigned module_test_msi(unsigned *events, unsigned *releases) {
+    unsigned live = 0;
+    for (unsigned i = 0; i < TEST_MSI_VECTORS; i++)
+        live += test_msi_used[i];
+    if (events)
+        *events = test_msi_events;
+    if (releases)
+        *releases = test_msi_release_events;
+    return live;
+}
 #endif
 static int host_net_attach(const void *ops) {
     if (loading_slot < 0)
@@ -743,6 +858,59 @@ static void host_block_detach(void) {
         block_unbind_ops((unsigned)loading_slot);
 }
 
+static void msi_attach_log(uint32_t bdf, int rc, unsigned vector) {
+    char text[160], n[24];
+    strcopy(text, "[irq] ", sizeof text);
+    size_t at = strlen(text);
+    strcopy(text + at, loading_slot >= 0 ? modules[loading_slot].name : "?", sizeof text - at);
+    at = strlen(text);
+    strcopy(text + at, " msi_attach(bdf=", sizeof text - at);
+    at = strlen(text);
+    uint_to_str(bdf, n);
+    strcopy(text + at, n, sizeof text - at);
+    at = strlen(text);
+    if (rc) {
+        strcopy(text + at, ") FAILED rc=-", sizeof text - at);
+        at = strlen(text);
+        uint_to_str((uint64_t)-(int64_t)rc, n);
+        strcopy(text + at, n, sizeof text - at);
+        at = strlen(text);
+        strcopy(text + at, " (poll-only unless it retries)\n", sizeof text - at);
+    } else {
+        strcopy(text + at, ") vector=", sizeof text - at);
+        at = strlen(text);
+        uint_to_str(vector, n);
+        strcopy(text + at, n, sizeof text - at);
+        at = strlen(text);
+        strcopy(text + at, "\n", sizeof text - at);
+    }
+    serial_write(text);
+}
+static int host_msi_attach(uint32_t bdf, void (*isr)(void), uint32_t *vector_out) {
+    if (loading_slot < 0 || !isr || !vector_out) {
+        if (loading_slot >= 0)
+            msi_attach_log(bdf, -22, 0);
+        return -22;
+    }
+#ifndef ARK_MODULE_HOST_TEST
+    /* Same contract as net ops / irq_attach: the ISR must live in this module's
+     * own RX code window, never in foreign or host code. */
+    Module *m = &modules[loading_slot];
+    uint64_t va = (uint64_t)(uintptr_t)isr;
+    if (va < m->code_va || va >= m->code_va + m->rx_pages * PAGE_BYTES) {
+        msi_attach_log(bdf, -22, 0);
+        return -22;
+    }
+#endif
+    int rc = msi_attach(bdf, isr, (int)loading_slot, vector_out);
+    msi_attach_log(bdf, rc, rc == 0 ? *vector_out : 0);
+    return rc;
+}
+static void host_msi_detach(void) {
+    if (loading_slot >= 0)
+        msi_release((int)loading_slot);
+}
+
 static const ArkDriverHost host_table = {
     .millis = platform_millis,
     .ticks = platform_ticks,
@@ -769,6 +937,8 @@ static const ArkDriverHost host_table = {
     .irq_attach = host_irq_attach,
     .block_attach = host_block_attach,
     .block_detach = host_block_detach,
+    .msi_attach = host_msi_attach,
+    .msi_detach = host_msi_detach,
 };
 static void module_poll_dispatch(unsigned slot) {
     if (slot >= ARCO_MODULE_MAX)
@@ -811,6 +981,8 @@ static void module_release(unsigned slot) {
     Module *m = &modules[slot];
     if (!m->used)
         return;
+    /* Safety net: no vector may outlive the slot that owns its ISR. */
+    module_msi_release(slot);
     window_clear(slot, 0, m->rx_pages * PAGE_BYTES);
     window_clear(slot, m->data_off, (m->image_pages - m->rx_pages) * PAGE_BYTES);
     window_clear(slot, MODULE_SLOT_STRIDE - ARCO_STACK_BYTES, ARCO_STACK_BYTES);
@@ -939,8 +1111,10 @@ static int module_load(const uint8_t *file, size_t bytes) {
     int64_t rc = module_call(m, m->entry, ARCO_OP_INIT);
     loading_slot = -1;
     if (rc < 0) {
-        /* INIT may have bound IRQ lines before failing; release them. */
+        /* INIT may have bound IRQ lines or MSI vectors before failing;
+         * release them. */
         module_irq_release((unsigned)slot);
+        module_msi_release((unsigned)slot);
         m->state = ARK_DRV_STATE_FAILED;
         strcopy(m->detail, "module init rejected the load", sizeof m->detail);
         fail("module init rejected the load");
@@ -1166,9 +1340,10 @@ static int64_t module_remove(ArkDriverRequest *q) {
         return -2;
     Module *m = &modules[slot];
     m->state = ARK_DRV_STATE_DISABLED;
-    /* Mask the module's PIC lines before DEINIT runs: no ISR may execute on
-     * the module stack while the driver is tearing its device down. */
+    /* Mask the module's PIC lines and MSI-X entries before DEINIT runs: no ISR
+     * may execute on the module stack while the driver tears its device down. */
     module_irq_release((unsigned)slot);
+    module_msi_release((unsigned)slot);
     /* Best-effort teardown on the module stack; a driver that refuses still
      * loses its device visibility below. Mapped pages stay reserved. */
     loading_slot = slot;
@@ -1249,6 +1424,26 @@ static void module_detail(const Module *m, char out[96]) {
         strcopy(out + at, " n=", 96 - at);
         at = strlen(out);
         uint_to_str(irq_count[i], num);
+        strcopy(out + at, num, 96 - at);
+        at = strlen(out);
+        any = true;
+    }
+    /* MSI/MSI-X evidence uses the same "n=" counter the smoke gates read; a
+     * driver that only polls never appears here. */
+    for (unsigned index = 0; at + 20 < 96; index++) {
+        unsigned vector;
+        uint64_t count;
+        if (!msi_owner_vector_at(slot, index, &vector, &count))
+            break;
+        char num[24];
+        strcopy(out + at, " msix", 96 - at);
+        at = strlen(out);
+        uint_to_str(vector, num);
+        strcopy(out + at, num, 96 - at);
+        at = strlen(out);
+        strcopy(out + at, " n=", 96 - at);
+        at = strlen(out);
+        uint_to_str(count, num);
         strcopy(out + at, num, 96 - at);
         at = strlen(out);
         any = true;
@@ -1377,6 +1572,11 @@ void module_test_reset(void) {
     test_route_fail = 0;
     test_disk_bound = false;
     test_disk_owner = 0;
+    memset(test_msi_used, 0, sizeof test_msi_used);
+    memset(test_msi_isr, 0, sizeof test_msi_isr);
+    memset(test_msi_count, 0, sizeof test_msi_count);
+    test_msi_events = test_msi_release_events = 0;
+    test_msi_fail = 0;
     test_map_count = 0;
     test_entry = 0;
     initialized = true;

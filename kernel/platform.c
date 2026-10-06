@@ -47,6 +47,11 @@ extern void ioapic_unmask(unsigned) __attribute__((weak));
 extern void ioapic_eoi(void) __attribute__((weak));
 extern unsigned ioapic_dump(const char *) __attribute__((weak));
 extern void ioapic_describe(unsigned, char *, size_t) __attribute__((weak));
+/* MSI-X vector delivery (kernel/msi.c allocates, kernel/module.c runs the ISR
+ * on the owning module's stack). Weak so diagnostic fixtures that link
+ * platform.c alone keep the legacy path. */
+extern bool msi_is_vector(unsigned) __attribute__((weak));
+extern int module_msi_dispatch(unsigned) __attribute__((weak));
 /* true once ISA lines are delivered by an IOAPIC; the 8259s stay masked. */
 static bool irq_apic_mode;
 bool platform_ram_range(uint64_t physical, uint64_t bytes) {
@@ -924,6 +929,17 @@ InterruptFrame *interrupt_dispatch(InterruptFrame *frame) {
     }
     if (vector == 255)
         return frame;
+    /* MSI/MSI-X vectors are delivered through the BSP LAPIC. Run the module
+     * ISR (if any) and complete the cycle with a LAPIC EOI. An unallocated
+     * vector in the window is a stray from a masked-off entry: still EOI so
+     * the LAPIC cannot wedge. */
+    if (msi_is_vector && msi_is_vector(vector)) {
+        if (module_msi_dispatch)
+            module_msi_dispatch(vector);
+        if (irq_apic_mode)
+            ioapic_eoi();
+        return frame;
+    }
     if (process_on_interrupt && (frame->cs & 3) == 3 && (vector < 32 || vector == 128))
         return process_on_interrupt(frame);
     if (vector < 32) {

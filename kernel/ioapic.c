@@ -442,6 +442,12 @@ void ioapic_unmask(unsigned irq) {
 void ioapic_eoi(void) {
     lapic_write(0xb0, 0);
 }
+bool ioapic_lapic_destination(uint32_t *id) {
+    if (!active || !id)
+        return false;
+    *id = bsp_id;
+    return true;
+}
 unsigned ioapic_dump(const char *reason) {
     if (!active)
         return 0;
