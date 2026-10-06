@@ -44,7 +44,7 @@ https://github.com/heDuke/ArkOS/tree/device/13700h-drivers
 
 尚未完成 / 如实标注：
 
-- **仅 QEMU q35 验证，未在真机 13700H 上跑**；实机固件 `_PRT`、MSI-X 表 BAR 布局与 NVMe 控制器行为需再验。
+- **仅 QEMU q35 验证（BIOS + UEFI 两套固件），未在真机 13700H 上跑**；实机固件 `_PRT`、MSI-X 表 BAR 布局与 NVMe 控制器行为需再验。UEFI/OVMF 会把 NVMe 的 64 位 BAR 放到 4 GiB 以上，`host_map_mmio` 已改走 `platform_map_mmio` 建立高窗口，`nvme_vm_test` gate4 覆盖。
 - **MSI（cap `0x05`）未实现**；QEMU 的 `e1000` 只有 MSI，故 MSI-X 冒烟改由 NVMe 完成。纯 INTx 设备（RTL8168）仍缺 `_PRT` + GSI 16+ 向量分配。
 - xHCI / RTL8168 驱动未开工。
 

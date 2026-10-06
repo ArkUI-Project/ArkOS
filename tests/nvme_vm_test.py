@@ -9,6 +9,8 @@ QEMU q35 gates).
      interrupt-driven rather than poll-only.
   3. Unload then reinstall: the kernel logs the vector release and the driver
      re-binds the same (recycled) vector, with no leftover or duplicate.
+  4. The same driver under UEFI/OVMF, where firmware places the 64-bit NVMe BAR
+     above 4 GiB, so a real sector read proves the high-window MMIO path.
 
     ARKOS_ISO=... python3 tests/nvme_vm_test.py
 """
@@ -151,6 +153,30 @@ try:
         f"reinstalled driver is not interrupt-driven: vec={vec2} n={n_again}"
     print(f"PASS gate3: vector released then recycled (vector={vector0}), I/O live again",
           flush=True)
-    print("PASS NVMe + MSI-X smoke gates (q35)", flush=True)
 finally:
     vm.close()
+
+# ---- gate 4: same driver under UEFI, where OVMF puts the 64-bit BAR > 4 GiB --
+u_disk = fresh_disk()
+u_nvme = fresh_nvme()
+uvm = VM("nvme-uefi", disk=str(u_disk), firmware="uefi", device=None,
+         extra_args=["-drive", f"file={u_nvme},format=raw,if=none,id=nvmedrive",
+                     "-device", "nvme,serial=arkosnvme,drive=nvmedrive"])
+try:
+    ulog = uvm.log.read_text()
+    assert "[module] loaded nvme" in ulog, ulog[-3000:]
+    m = re.search(r"\[irq\] nvme msi_attach\(bdf=(\d+)\) vector=(\d+)", ulog)
+    assert m, "nvme did not bind an MSI-X vector under UEFI: " + ulog[-3000:]
+    assert "[exception]" not in ulog and "[panic]" not in ulog, ulog[-2000:]
+    sign_in(uvm)
+    uvm.terminal()
+    _, un0 = driver_n(uvm)
+    command(uvm, "dev blk 1 read 0 1", "Read 1 sectors.")
+    time.sleep(1.0)
+    _, un1 = driver_n(uvm)
+    assert un1 > un0, f"UEFI read did not raise the ISR count: {un0} -> {un1}"
+    print(f"PASS gate4: UEFI high-BAR NVMe online, MSI-X vector={m.group(2)}, "
+          f"ISR n={un0}->{un1}", flush=True)
+    print("PASS NVMe + MSI-X smoke gates (q35 BIOS+UEFI)", flush=True)
+finally:
+    uvm.close()

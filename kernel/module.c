@@ -36,6 +36,7 @@
 #include "net.h"
 #include "block.h"
 #include "msi.h"
+#include "mmio.h"
 extern bool vfs_path_canonical(char out[128], const char *path);
 
 #define MODULE_PML4_INDEX 1u
@@ -417,9 +418,14 @@ static void host_log(const char *text) {
 }
 static void *host_map_mmio(uint64_t physical, uint64_t bytes) {
     /* MMIO apertures below 4 GiB sit inside the kernel identity map already;
-     * the returned pointer is a supervisor-only alias. */
+     * the returned pointer is a supervisor-only alias. A firmware-assigned
+     * window above 4 GiB (OVMF can place a 64-bit NVMe BAR there) is mapped
+     * uncached by platform_map_mmio first; process PML4s share the same page
+     * tables, so the identity VA is then valid in every address space. */
     if (!physical || physical < 0x10000 || !bytes ||
-        physical + bytes > 0x100000000ull || bytes > 64u * 1024 * 1024)
+        bytes > 64u * 1024 * 1024 || physical + bytes < physical)
+        return 0;
+    if (physical + bytes > 0x100000000ull && !platform_map_mmio(physical, bytes))
         return 0;
     return (void *)(uintptr_t)physical;
 }

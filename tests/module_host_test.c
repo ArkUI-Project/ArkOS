@@ -113,6 +113,11 @@ bool block_flush(BlockDevice *device) {
 const char *block_error(void) {
     return "no block device";
 }
+bool platform_map_mmio(uint64_t physical, uint64_t bytes) {
+    /* Host-test stand-in for kernel/mmio.c: only the range guard is observable
+     * here, so mirror its documented bounds (>=1 MiB, <=16 MiB per call). */
+    return physical >= 0x100000ull && bytes && bytes <= 16u * 1024 * 1024;
+}
 void process_wake(uint32_t pid) {
     (void)pid;
 }
@@ -835,13 +840,17 @@ static void test_host_table(void) {
     uint64_t bar_base;
     CHECK(host->pci_bar_base(0x1800, 0, &bar_base) == -2); /* device has no BAR */
     CHECK(host->pci_bar_base(0x1800, 9, &bar_base) == -2);
-    /* MMIO alias guard: no zero, no zero length, nothing outside 4 GiB */
+    /* MMIO alias guard: no zero, no zero length, bounded size. Apertures below
+     * 4 GiB use the identity map; higher firmware windows are handed to
+     * platform_map_mmio and rejected when it refuses (here: over 16 MiB). */
     CHECK(host->map_mmio(0, 4096) == 0);
     CHECK(host->map_mmio(0x1000, 0) == 0);
     CHECK(host->map_mmio(0x1000, 1ull << 32) == 0);
     CHECK(host->map_mmio(0x1000, 128ull * 1024 * 1024) == 0);
-    CHECK(host->map_mmio(0xfffff000ull, 0x4000) == 0);
+    CHECK(host->map_mmio(0xfffff000ull, 0x4000) != 0); /* straddles 4 GiB */
     CHECK(host->map_mmio(0xf0000000ull, 4096) != 0);
+    CHECK(host->map_mmio(0xc000000000ull, 0x4000) != 0); /* high 64-bit BAR */
+    CHECK(host->map_mmio(0xc000000000ull, 32ull * 1024 * 1024) == 0);
     /* log must stay bounded and prefix every line */
     char big[512];
     memset(big, 'x', sizeof big - 1);
