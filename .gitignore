@@ -25,3 +25,5 @@ venv/
 *.swp
 *.swo
 *~
+# Temporary handoff notes; kept on disk but not tracked.
+/TODO.md
