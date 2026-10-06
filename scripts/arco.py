@@ -45,7 +45,19 @@ CFLAGS = [
     "-fno-asynchronous-unwind-tables", "-fno-plt", "-fPIC", "-fvisibility=hidden",
     "-m64", "-mno-red-zone", "-mgeneral-regs-only", "-mcmodel=small",
 ]
+PT_LOAD = 1
+# Must match kernel PAGE_BYTES in kernel/module.c: the loader copies image_size
+# bytes to the slot base and maps rx_pages = data_off / PAGE_BYTES whole pages.
+ELF_PAGE = 4096
+
 LDFLAGS = ["-nostdlib", "-static", "--no-dynamic-linker", "-z", "noexecstack",
+           # The loader maps the image in whole 4 KiB pages and splits it at
+           # data_off with one permission pair per page, so a toolchain that
+           # aligns segments to a coarser granule only buys padding the loader
+           # can never use. aarch64 compilers default to 64 KiB and allow up to
+           # 2 MiB; without this pin the packed image grows with the toolchain's
+           # page size rather than with the driver's code.
+           "-z", f"max-page-size={ELF_PAGE:#x}",
            "-T", LINKER, "--fatal-warnings"]
 
 
@@ -124,12 +136,79 @@ def check_write_boundaries(path, data_off):
                          "\n  ".join(bad))
 
 
+def load_segments(data):
+    """PT_LOAD entries of a linked ELF64, ordered by virtual address."""
+    if data[:4] != b"\x7fELF" or data[4] != 2:
+        raise SystemExit("arco: linked output is not a 64-bit ELF")
+    end = "<" if data[5] == 1 else ">"
+    phoff = struct.unpack_from(end + "Q", data, 32)[0]
+    phentsize, phnum = struct.unpack_from(end + "HH", data, 54)
+    segments = []
+    for index in range(phnum):
+        head = phoff + index * phentsize
+        if struct.unpack_from(end + "I", data, head)[0] != PT_LOAD:
+            continue
+        offset, vaddr, _paddr, filesz, memsz, align = struct.unpack_from(
+            end + "6Q", data, head + 8)
+        segments.append((vaddr, offset, filesz, memsz, align))
+    segments.sort()
+    return segments
+
+
+def build_image(path, image_end):
+    """Assemble the .arco payload straight from the ELF program headers.
+
+    `objcopy -O binary` flattens the whole address span, so every alignment gap
+    between segments becomes real zero bytes in the file. That is nearly free on
+    x86-64, where the granule is 4 KiB, but an aarch64 compiler aligns segments
+    to 64 KiB by default and may be configured for up to 2 MiB: the packed file
+    then grows with the toolchain's page size instead of with the driver's code.
+    A driver holding 3.7 KiB measured 64 KiB at a 64 KiB granule and 2 MiB at a
+    2 MiB granule, the latter overrunning MAX_IMAGE outright.
+
+    The payload stays flat because the loader copies image_size bytes to the slot
+    base (kernel/module.c), so a hole cannot be skipped -- but it is bounded to a
+    single page, and anything wider is reported here instead of silently padded.
+    """
+    with open(path, "rb") as handle:
+        data = handle.read()
+    segments = load_segments(data)
+    if not segments:
+        raise SystemExit("arco: linked image has no loadable segment")
+    base = segments[0][0]
+    image = bytearray()
+    for vaddr, offset, filesz, _memsz, align in segments:
+        if align > ELF_PAGE:
+            raise SystemExit(
+                f"arco: segment at {vaddr:#x} is aligned to {align:#x}, past the "
+                f"{ELF_PAGE} byte page the loader maps. Relink with "
+                f"-z max-page-size={ELF_PAGE:#x}.")
+        hole = (vaddr - base) - len(image)
+        if hole > ELF_PAGE:
+            raise SystemExit(
+                f"arco: {hole} byte hole before {vaddr:#x} exceeds one page; the "
+                "flat payload cannot skip it. Reduce the driver's section "
+                "alignment, or relink with "
+                f"-z max-page-size={ELF_PAGE:#x}.")
+        image.extend(bytes(hole))
+        image.extend(data[offset:offset + filesz])
+    if image_end > len(image):
+        # __arco_image_end is the location counter after .data, aligned up for
+        # .bss, so the segments can stop a few bytes short of it. Those bytes are
+        # data-region padding that the zeroed pool would hold anyway.
+        if image_end - len(image) > ELF_PAGE:
+            raise SystemExit(
+                f"arco: {image_end - len(image)} bytes between the last segment "
+                f"and __arco_image_end ({image_end:#x}) exceed one page")
+        image.extend(bytes(image_end - len(image)))
+    return bytes(image[:image_end])
+
+
 def build(sources, name, version, output, cc, ld, keep):
     if not name or not all(c.islower() or c.isdigit() or c in "_-." for c in name):
         raise SystemExit("arco: --name must be [a-z0-9_.-], 1..31 chars")
     with tempfile.TemporaryDirectory(prefix="arco-") as tmp:
         elf = os.path.join(tmp, "driver.elf")
-        raw = os.path.join(tmp, "driver.bin")
         objects = []
         for index, source in enumerate(sources):
             target = os.path.join(tmp, "driver.o" if index == 0 else f"extra{index}.o")
@@ -165,13 +244,7 @@ def build(sources, name, version, output, cc, ld, keep):
             raise SystemExit(f"arco: bss {bss_size} exceeds the {MAX_BSS} byte budget")
         check_write_boundaries(elf, data_off)
 
-        subprocess.run(["objcopy", "-O", "binary", "--gap-fill", "0", elf, raw],
-                       check=True)
-        with open(raw, "rb") as handle:
-            image = handle.read()
-        # The kernel maps the run page by page; the header's image_size covers
-        # the file bytes only and .bss travels as a separate zero-fill length.
-        image = image[:image_end]
+        image = build_image(elf, image_end)
         if not image or len(image) > MAX_IMAGE:
             raise SystemExit(f"arco: image size {len(image)} out of range")
         version_major, version_minor, version_patch = (version + ".0.0").split(".")[:3]
@@ -200,7 +273,10 @@ def build(sources, name, version, output, cc, ld, keep):
             handle.write(bytes(header))
             handle.write(image)
         if keep:
-            subprocess.run(["objcopy", "-O", "binary", elf, keep], check=True)
+            # The same bytes the loader will see, not a second objcopy pass that
+            # could pad differently from the packed image.
+            with open(keep, "wb") as handle:
+                handle.write(image)
         print(f"{output}: {len(header) + len(image)} bytes "
               f"(image {len(image)}, data @{data_off:#x}, bss {bss_size}, "
               f"entry {entry_off:#x}, api {API_VERSION})")
