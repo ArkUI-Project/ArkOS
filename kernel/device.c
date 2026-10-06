@@ -224,6 +224,29 @@ bool device_block_read(uint32_t index, uint64_t lba, uint32_t sectors, void *buf
     set_error("");
     return true;
 }
+bool device_block_write(uint32_t index, uint64_t lba, uint32_t sectors, const void *buffer) {
+    const ArkDeviceInfo *n = device_info(index);
+    if (!n || n->class_id != ARK_DEV_CLASS_BLOCK || n->unit >= 2 ||
+        (n->flags & (ARK_DEV_PRESENT | ARK_DEV_WRITABLE)) != (ARK_DEV_PRESENT | ARK_DEV_WRITABLE) ||
+        (n->flags & ARK_DEV_SYSTEM_VOLUME)) {
+        set_error("device is not a writable block volume");
+        return false;
+    }
+    if (!sectors || !buffer) {
+        set_error("block request out of range");
+        return false;
+    }
+    if (n->blocks && (lba >= n->blocks || sectors > n->blocks - lba)) {
+        set_error("block request out of range");
+        return false;
+    }
+    if (!block_write(block_device(n->unit), lba, sectors, buffer)) {
+        set_error(block_error());
+        return false;
+    }
+    set_error("");
+    return true;
+}
 bool device_block_flush(uint32_t index) {
     const ArkDeviceInfo *n = device_info(index);
     if (!n || n->class_id != ARK_DEV_CLASS_BLOCK || n->unit >= 2 ||

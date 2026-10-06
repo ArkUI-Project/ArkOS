@@ -34,6 +34,9 @@
 #include "alloc.h"
 #include "blob.h"
 #include "net.h"
+#include "block.h"
+#include "msi.h"
+#include "mmio.h"
 extern bool vfs_path_canonical(char out[128], const char *path);
 
 #define MODULE_PML4_INDEX 1u
@@ -85,8 +88,10 @@ static int loading_slot = -1; /* slot currently inside arco_entry(INIT/DEINIT) *
  * most once per boot and stays armed; the module's poll_fn pointer inside it
  * is swapped on reload, and the dispatch gate skips non-LOADED slots. */
 static bool poll_slot_registered[ARCO_MODULE_MAX];
-/* Legacy PIC lines owned by modules: -1 = free. Lines used by the platform
- * itself (PIT 0, PS/2 1 and 12, cascade 2) read as busy to irq_attach. */
+/* ISA lines (0..15) owned by modules: -1 = free. Lines used by the platform
+ * itself (PIT 0, PS/2 1 and 12, cascade 2) read as busy to irq_attach. The
+ * platform delivers a bound line through an IOAPIC RTE when the MADT lists
+ * one, else through the legacy 8259. */
 #define MODULE_IRQ_LINES 16u
 #define KERNEL_IRQ_MASK ((1u << 0) | (1u << 1) | (1u << 2) | (1u << 12))
 /* Static -1 fill is load-bearing: interrupts run before module_init, and a
@@ -94,6 +99,10 @@ static bool poll_slot_registered[ARCO_MODULE_MAX];
 static int8_t irq_owner[MODULE_IRQ_LINES] = {
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 static void (*irq_fn[MODULE_IRQ_LINES])(void);
+/* ISR invocations per bound line since its last irq_attach. Exposed in the
+ * driver detail ("irq11 ... n=42") so a poll-only driver cannot pass for an
+ * interrupt-driven one. */
+static uint64_t irq_count[MODULE_IRQ_LINES];
 static char last_error[128];
 /* Why an installed module did not activate during this boot. */
 static char boot_error[128];
@@ -409,9 +418,14 @@ static void host_log(const char *text) {
 }
 static void *host_map_mmio(uint64_t physical, uint64_t bytes) {
     /* MMIO apertures below 4 GiB sit inside the kernel identity map already;
-     * the returned pointer is a supervisor-only alias. */
+     * the returned pointer is a supervisor-only alias. A firmware-assigned
+     * window above 4 GiB (OVMF can place a 64-bit NVMe BAR there) is mapped
+     * uncached by platform_map_mmio first; process PML4s share the same page
+     * tables, so the identity VA is then valid in every address space. */
     if (!physical || physical < 0x10000 || !bytes ||
-        physical + bytes > 0x100000000ull || bytes > 64u * 1024 * 1024)
+        bytes > 64u * 1024 * 1024 || physical + bytes < physical)
+        return 0;
+    if (physical + bytes > 0x100000000ull && !platform_map_mmio(physical, bytes))
         return 0;
     return (void *)(uintptr_t)physical;
 }
@@ -482,35 +496,101 @@ static int host_register_poll(void (*poll)(void)) {
     m->has_poll = 1;
     return 0;
 }
-/* Platform hook: mask/unmask one legacy PIC line (no-ops in the host test). */
-void platform_irq_mask(unsigned irq);
-void platform_irq_unmask(unsigned irq);
-/* Drop every PIC line bound to slot: mask at the PIC first so no ISR can
- * run while the module is being torn down. */
+/* Platform hooks (kernel/platform.c; stateful stubs in the host test).
+ * route allocates delivery for one ISA line (IOAPIC RTE or PIC IMR bit) and
+ * fails visibly; release is its exact inverse. */
+int platform_irq_route(unsigned irq);
+void platform_irq_release(unsigned irq);
+void platform_irq_describe(unsigned irq, char *out, size_t cap);
+/* Drop every line bound to slot: release its RTE / mask the PIC line first
+ * so no ISR can run while the module is being torn down. */
 static void module_irq_release(unsigned slot) {
     for (unsigned i = 0; i < MODULE_IRQ_LINES; i++)
         if (irq_owner[i] == (int)slot) {
-            platform_irq_mask(i);
+            platform_irq_release(i);
             irq_owner[i] = -1;
             irq_fn[i] = 0;
         }
 }
+/* MSI-X vectors record their owning slot in msi.c, so releasing a module's
+ * interrupts is a single call. Masks each device entry before the vector is
+ * reusable, so no ISR can run while the module is torn down. */
+static void module_msi_release(unsigned slot) {
+    unsigned released = msi_owner_vectors((int)slot);
+    msi_release((int)slot);
+    if (released) {
+        char n[8];
+        serial_write("[irq] msi vectors released n=");
+        uint_to_str(released, n);
+        serial_write(n);
+        serial_write("\n");
+    }
+}
+static void irq_attach_log(uint32_t irq, int rc, const char *why) {
+    char text[160], n[24];
+    strcopy(text, "[irq] ", sizeof text);
+    size_t at = strlen(text);
+    strcopy(text + at, loading_slot >= 0 ? modules[loading_slot].name : "?", sizeof text - at);
+    at = strlen(text);
+    strcopy(text + at, " irq_attach(", sizeof text - at);
+    at = strlen(text);
+    uint_to_str(irq, n);
+    strcopy(text + at, n, sizeof text - at);
+    at = strlen(text);
+    if (rc) {
+        strcopy(text + at, ") FAILED rc=-", sizeof text - at);
+        at = strlen(text);
+        uint_to_str((uint64_t)-(int64_t)rc, n);
+        strcopy(text + at, n, sizeof text - at);
+        at = strlen(text);
+        strcopy(text + at, " (", sizeof text - at);
+        at = strlen(text);
+        strcopy(text + at, why, sizeof text - at);
+        at = strlen(text);
+        strcopy(text + at, "); driver is poll-only unless it retries\n", sizeof text - at);
+    } else {
+        char route[64];
+        platform_irq_describe(irq, route, sizeof route);
+        strcopy(text + at, ") bound -> ", sizeof text - at);
+        at = strlen(text);
+        strcopy(text + at, route[0] ? route : "unrouted", sizeof text - at);
+        at = strlen(text);
+        strcopy(text + at, "\n", sizeof text - at);
+    }
+    serial_write(text);
+}
 static int host_irq_attach(uint32_t irq, void (*isr)(void)) {
-    if (loading_slot < 0 || !isr || irq >= MODULE_IRQ_LINES)
+    if (loading_slot < 0 || !isr || irq >= MODULE_IRQ_LINES) {
+        if (loading_slot >= 0)
+            irq_attach_log(irq, -22, !isr ? "null isr" : "line outside 0..15");
         return -22;
+    }
 #ifndef ARK_MODULE_HOST_TEST
     /* Same contract as net ops: the ISR must live in this module's own RX
      * code window, never in foreign or host code. */
     Module *m = &modules[loading_slot];
     uint64_t va = (uint64_t)(uintptr_t)isr;
-    if (va < m->code_va || va >= m->code_va + m->rx_pages * PAGE_BYTES)
+    if (va < m->code_va || va >= m->code_va + m->rx_pages * PAGE_BYTES) {
+        irq_attach_log(irq, -22, "isr outside module code");
         return -22;
+    }
 #endif
-    if ((KERNEL_IRQ_MASK & (1u << irq)) || irq_owner[irq] >= 0)
+    if ((KERNEL_IRQ_MASK & (1u << irq)) || irq_owner[irq] >= 0) {
+        irq_attach_log(irq, -16, "line owned by kernel or another module");
         return -16; /* platform-owned or already bound */
+    }
     irq_owner[irq] = (int8_t)loading_slot;
     irq_fn[irq] = isr;
-    platform_irq_unmask(irq);
+    irq_count[irq] = 0;
+    int rc = platform_irq_route(irq);
+    if (rc < 0) {
+        /* No IOAPIC pin / RTE busy: the binding never existed. */
+        irq_owner[irq] = -1;
+        irq_fn[irq] = 0;
+        irq_attach_log(irq, rc, rc == -19 ? "no IOAPIC pin for line" : "RTE busy");
+        return rc;
+    }
+    irq_attach_log(irq, 0, "");
     return 0;
 }
 /* Called from interrupt_dispatch before the PIC EOI. A stale binding (module
@@ -530,6 +610,24 @@ int module_irq_dispatch(unsigned irq) {
         module_irq_release((unsigned)slot);
         return 0;
     }
+    irq_count[irq]++;
+    module_stack_call(m->stack_top, (void *)fn, 0, 0);
+    return 1;
+}
+/* MSI/MSI-X counterpart of module_irq_dispatch. Same stale-binding rule: a
+ * vector whose module is mid-teardown is released instead of reaching code
+ * that may already be gone. */
+int module_msi_dispatch(unsigned vector) {
+    int slot = msi_vector_owner(vector);
+    if (slot < 0)
+        return 0;
+    Module *m = &modules[slot];
+    void (*fn)(void) = msi_vector_isr(vector);
+    if (!m->used || m->state != ARK_DRV_STATE_LOADED || !fn) {
+        msi_release(slot);
+        return 0;
+    }
+    msi_vector_note(vector);
     module_stack_call(m->stack_top, (void *)fn, 0, 0);
     return 1;
 }
@@ -551,9 +649,46 @@ static uint64_t host_phys_of(const void *va_ptr) {
     return 0;
 }
 #ifdef ARK_MODULE_HOST_TEST
-/* No PIC in the harness: the mask hooks become observable no-ops. */
-void platform_irq_mask(unsigned irq) { (void)irq; }
-void platform_irq_unmask(unsigned irq) { (void)irq; }
+/* No PIC/IOAPIC in the harness: a stateful route table stands in for the
+ * RTEs so the allocate/release contract is observable (a second route of a
+ * live line fails, release frees it, reload reallocates it exactly once). */
+static uint8_t test_routed[MODULE_IRQ_LINES];
+static unsigned test_route_events, test_release_events;
+static int test_route_fail = 0;
+int platform_irq_route(unsigned irq) {
+    if (irq >= MODULE_IRQ_LINES)
+        return -22;
+    if (test_route_fail)
+        return test_route_fail;
+    if (test_routed[irq])
+        return -16;
+    test_routed[irq] = 1;
+    test_route_events++;
+    return 0;
+}
+void platform_irq_release(unsigned irq) {
+    if (irq < MODULE_IRQ_LINES && test_routed[irq]) {
+        test_routed[irq] = 0;
+        test_release_events++;
+    }
+}
+void platform_irq_describe(unsigned irq, char *out, size_t cap) {
+    (void)irq;
+    strcopy(out, "test route", cap);
+}
+unsigned module_test_routed(unsigned *routes, unsigned *releases) {
+    unsigned live = 0;
+    for (unsigned i = 0; i < MODULE_IRQ_LINES; i++)
+        live += test_routed[i];
+    if (routes)
+        *routes = test_route_events;
+    if (releases)
+        *releases = test_release_events;
+    return live;
+}
+void module_test_route_fail(int rc) {
+    test_route_fail = rc;
+}
 /* No network stack in the harness; a stateful stub keeps the bind contract
  * exercisable (second bind fails until the owner's unbind). */
 static bool test_nic_bound;
@@ -570,6 +705,119 @@ int net_bind_nic(const void *ops, unsigned owner) {
 void net_unbind_nic(unsigned owner) {
     if (test_nic_bound && test_nic_owner == owner)
         test_nic_bound = false;
+}
+/* No block layer in the harness either; the same stateful contract lets the
+ * harness assert bind/refuse/release through host->block_attach. */
+static bool test_disk_bound;
+static unsigned test_disk_owner;
+int block_bind_ops(const void *ops, unsigned owner) {
+    if (!ops)
+        return -22;
+    if (test_disk_bound)
+        return -16;
+    test_disk_bound = true;
+    test_disk_owner = owner;
+    return 1; /* a fixed unit so the harness can assert the slot propagates */
+}
+void block_unbind_ops(unsigned owner) {
+    if (test_disk_bound && test_disk_owner == owner)
+        test_disk_bound = false;
+}
+unsigned module_test_block(unsigned *owner) {
+    if (owner)
+        *owner = test_disk_bound ? test_disk_owner : 0;
+    return test_disk_bound ? 1u : 0u;
+}
+/* No PCI or MSI-X in the harness: a small stateful vector table stands in for
+ * kernel/msi.c so the attach/refuse/release contract is observable through
+ * host->msi_attach and module_msi_dispatch. */
+#define TEST_MSI_VECTORS 4u
+#define TEST_MSI_FIRST 0x40u
+static uint8_t test_msi_used[TEST_MSI_VECTORS];
+static uint32_t test_msi_bdf[TEST_MSI_VECTORS];
+static uint8_t test_msi_owner[TEST_MSI_VECTORS];
+static void (*test_msi_isr[TEST_MSI_VECTORS])(void);
+static uint64_t test_msi_count[TEST_MSI_VECTORS];
+static unsigned test_msi_events, test_msi_release_events;
+static int test_msi_fail;
+int msi_attach(uint32_t bdf, void (*isr)(void), int owner, uint32_t *vector_out) {
+    if (!isr || !vector_out)
+        return -22;
+    if (test_msi_fail)
+        return test_msi_fail;
+    for (unsigned i = 0; i < TEST_MSI_VECTORS; i++)
+        if (!test_msi_used[i]) {
+            test_msi_used[i] = 1;
+            test_msi_bdf[i] = bdf;
+            test_msi_owner[i] = (uint8_t)owner;
+            test_msi_isr[i] = isr;
+            test_msi_count[i] = 0;
+            *vector_out = TEST_MSI_FIRST + i;
+            test_msi_events++;
+            return 0;
+        }
+    return -16;
+}
+void msi_release(int owner) {
+    for (unsigned i = 0; i < TEST_MSI_VECTORS; i++)
+        if (test_msi_used[i] && test_msi_owner[i] == (uint8_t)owner) {
+            test_msi_used[i] = 0;
+            test_msi_isr[i] = 0;
+            test_msi_count[i] = 0;
+            test_msi_release_events++;
+        }
+}
+bool msi_is_vector(unsigned vector) {
+    return vector >= TEST_MSI_FIRST && vector < TEST_MSI_FIRST + TEST_MSI_VECTORS;
+}
+int msi_vector_owner(unsigned vector) {
+    if (!msi_is_vector(vector))
+        return -1;
+    unsigned i = vector - TEST_MSI_FIRST;
+    return test_msi_used[i] ? test_msi_owner[i] : -1;
+}
+void (*msi_vector_isr(unsigned vector))(void) {
+    if (!msi_is_vector(vector))
+        return 0;
+    return test_msi_isr[vector - TEST_MSI_FIRST];
+}
+void msi_vector_note(unsigned vector) {
+    if (msi_is_vector(vector))
+        test_msi_count[vector - TEST_MSI_FIRST]++;
+}
+bool msi_owner_vector_at(int owner, unsigned index, unsigned *vector, uint64_t *count) {
+    for (unsigned i = 0; i < TEST_MSI_VECTORS; i++) {
+        if (!test_msi_used[i] || test_msi_owner[i] != (uint8_t)owner)
+            continue;
+        if (index--)
+            continue;
+        if (vector)
+            *vector = TEST_MSI_FIRST + i;
+        if (count)
+            *count = test_msi_count[i];
+        return true;
+    }
+    return false;
+}
+unsigned msi_owner_vectors(int owner) {
+    unsigned n = 0;
+    for (unsigned i = 0; i < TEST_MSI_VECTORS; i++)
+        if (test_msi_used[i] && test_msi_owner[i] == (uint8_t)owner)
+            n++;
+    return n;
+}
+void module_test_msi_fail(int rc) {
+    test_msi_fail = rc;
+}
+unsigned module_test_msi(unsigned *events, unsigned *releases) {
+    unsigned live = 0;
+    for (unsigned i = 0; i < TEST_MSI_VECTORS; i++)
+        live += test_msi_used[i];
+    if (events)
+        *events = test_msi_events;
+    if (releases)
+        *releases = test_msi_release_events;
+    return live;
 }
 #endif
 static int host_net_attach(const void *ops) {
@@ -600,6 +848,83 @@ static void host_net_detach(void) {
         net_unbind_nic((unsigned)loading_slot);
 }
 
+static int host_block_attach(const void *ops) {
+    if (loading_slot < 0)
+        return -22;
+    const ArkBlockOps *table = (const ArkBlockOps *)ops;
+    if (!table || !table->sectors || !table->transfer || !table->flush)
+        return -22;
+#ifndef ARK_MODULE_HOST_TEST
+    Module *m = &modules[loading_slot];
+    uint64_t begin = m->code_va, end = m->code_va + m->rx_pages * PAGE_BYTES;
+    const void *fns[] = {(const void *)table->sectors, (const void *)table->transfer,
+                         (const void *)table->flush};
+    for (unsigned i = 0; i < sizeof fns / sizeof fns[0]; i++) {
+        uint64_t va = (uint64_t)(uintptr_t)fns[i];
+        if (va < begin || va >= end)
+            return -22;
+    }
+#endif
+    return block_bind_ops(ops, (unsigned)loading_slot);
+}
+static void host_block_detach(void) {
+    if (loading_slot >= 0)
+        block_unbind_ops((unsigned)loading_slot);
+}
+
+static void msi_attach_log(uint32_t bdf, int rc, unsigned vector) {
+    char text[160], n[24];
+    strcopy(text, "[irq] ", sizeof text);
+    size_t at = strlen(text);
+    strcopy(text + at, loading_slot >= 0 ? modules[loading_slot].name : "?", sizeof text - at);
+    at = strlen(text);
+    strcopy(text + at, " msi_attach(bdf=", sizeof text - at);
+    at = strlen(text);
+    uint_to_str(bdf, n);
+    strcopy(text + at, n, sizeof text - at);
+    at = strlen(text);
+    if (rc) {
+        strcopy(text + at, ") FAILED rc=-", sizeof text - at);
+        at = strlen(text);
+        uint_to_str((uint64_t)-(int64_t)rc, n);
+        strcopy(text + at, n, sizeof text - at);
+        at = strlen(text);
+        strcopy(text + at, " (poll-only unless it retries)\n", sizeof text - at);
+    } else {
+        strcopy(text + at, ") vector=", sizeof text - at);
+        at = strlen(text);
+        uint_to_str(vector, n);
+        strcopy(text + at, n, sizeof text - at);
+        at = strlen(text);
+        strcopy(text + at, "\n", sizeof text - at);
+    }
+    serial_write(text);
+}
+static int host_msi_attach(uint32_t bdf, void (*isr)(void), uint32_t *vector_out) {
+    if (loading_slot < 0 || !isr || !vector_out) {
+        if (loading_slot >= 0)
+            msi_attach_log(bdf, -22, 0);
+        return -22;
+    }
+#ifndef ARK_MODULE_HOST_TEST
+    /* Same contract as net ops / irq_attach: the ISR must live in this module's
+     * own RX code window, never in foreign or host code. */
+    Module *m = &modules[loading_slot];
+    uint64_t va = (uint64_t)(uintptr_t)isr;
+    if (va < m->code_va || va >= m->code_va + m->rx_pages * PAGE_BYTES) {
+        msi_attach_log(bdf, -22, 0);
+        return -22;
+    }
+#endif
+    int rc = msi_attach(bdf, isr, (int)loading_slot, vector_out);
+    msi_attach_log(bdf, rc, rc == 0 ? *vector_out : 0);
+    return rc;
+}
+static void host_msi_detach(void) {
+    if (loading_slot >= 0)
+        msi_release((int)loading_slot);
+}
+
 static const ArkDriverHost host_table = {
     .millis = platform_millis,
     .ticks = platform_ticks,
@@ -624,6 +949,10 @@ static const ArkDriverHost host_table = {
     .net_attach = host_net_attach,
     .net_detach = host_net_detach,
     .irq_attach = host_irq_attach,
+    .block_attach = host_block_attach,
+    .block_detach = host_block_detach,
+    .msi_attach = host_msi_attach,
+    .msi_detach = host_msi_detach,
 };
 static void module_poll_dispatch(unsigned slot) {
     if (slot >= ARCO_MODULE_MAX)
@@ -666,6 +995,8 @@ static void module_release(unsigned slot) {
     Module *m = &modules[slot];
     if (!m->used)
         return;
+    /* Safety net: no vector may outlive the slot that owns its ISR. */
+    module_msi_release(slot);
     window_clear(slot, 0, m->rx_pages * PAGE_BYTES);
     window_clear(slot, m->data_off, (m->image_pages - m->rx_pages) * PAGE_BYTES);
     window_clear(slot, MODULE_SLOT_STRIDE - ARCO_STACK_BYTES, ARCO_STACK_BYTES);
@@ -794,8 +1125,12 @@ static int module_load(const uint8_t *file, size_t bytes) {
     int64_t rc = module_call(m, m->entry, ARCO_OP_INIT);
     loading_slot = -1;
     if (rc < 0) {
-        /* INIT may have bound IRQ lines before failing; release them. */
+        /* INIT may have bound IRQ lines, MSI vectors, a NIC or a disk before
+         * failing; force every binding off so a FAILED slot owns nothing. */
         module_irq_release((unsigned)slot);
+        module_msi_release((unsigned)slot);
+        net_unbind_nic((unsigned)slot);
+        block_unbind_ops((unsigned)slot);
         m->state = ARK_DRV_STATE_FAILED;
         strcopy(m->detail, "module init rejected the load", sizeof m->detail);
         fail("module init rejected the load");
@@ -838,10 +1173,12 @@ static int module_activate(const ManifestEntry *e, const uint8_t *file,
  * entry; removing one lasts until the next boot. */
 #ifndef ARK_MODULE_HOST_TEST
 extern const uint8_t _arkos_driver_e1000_start[], _arkos_driver_e1000_end[];
+extern const uint8_t _arkos_driver_nvme_start[], _arkos_driver_nvme_end[];
 static const struct {
     const uint8_t *start, *end;
 } embedded_drivers[] = {
     {_arkos_driver_e1000_start, _arkos_driver_e1000_end},
+    {_arkos_driver_nvme_start, _arkos_driver_nvme_end},
 };
 #endif
 static void module_load_embedded(void) {
@@ -926,10 +1263,26 @@ static int64_t module_install(ArkDriverRequest *q) {
         const char *name = q->path + 5;
         if (!name[0] || strlen(name) >= sizeof q->name)
             return -22;
-        uint32_t uid = accounts_current_uid();
+        /* ARK_BLOB_READ requires capacity == stored length (see blob_measure). */
+        uint32_t uid = accounts_current_uid(), length = 0;
+        bool measured = false;
+        for (unsigned i = 0; i < MODULE_BLOB_SCAN; i++) {
+            ArkBlobRequest qlist = {0};
+            qlist.op = ARK_BLOB_LIST;
+            qlist.index = i;
+            if (blob_kernel_request(&qlist, uid) < 0)
+                break;
+            if (!strcmp(qlist.name, name)) {
+                length = qlist.size;
+                measured = true;
+                break;
+            }
+        }
+        if (!measured || !length || length > sizeof file)
+            return strcopy(q->error, "source blob unreadable", sizeof q->error), -2;
         ArkBlobRequest b = {0};
         b.op = ARK_BLOB_READ;
-        b.capacity = sizeof file;
+        b.capacity = length;
         b.buffer = (uint64_t)(uintptr_t)file;
         strcopy(b.name, name, sizeof b.name);
         if (blob_kernel_request(&b, uid) < 0)
@@ -1005,9 +1358,10 @@ static int64_t module_remove(ArkDriverRequest *q) {
         return -2;
     Module *m = &modules[slot];
     m->state = ARK_DRV_STATE_DISABLED;
-    /* Mask the module's PIC lines before DEINIT runs: no ISR may execute on
-     * the module stack while the driver is tearing its device down. */
+    /* Mask the module's PIC lines and MSI-X entries before DEINIT runs: no ISR
+     * may execute on the module stack while the driver tears its device down. */
     module_irq_release((unsigned)slot);
+    module_msi_release((unsigned)slot);
     /* Best-effort teardown on the module stack; a driver that refuses still
      * loses its device visibility below. Mapped pages stay reserved. */
     loading_slot = slot;
@@ -1016,6 +1370,7 @@ static int64_t module_remove(ArkDriverRequest *q) {
     /* A NIC driver should detach in DEINIT; force it so the network stack
      * can never call ops of a removed module. */
     net_unbind_nic((unsigned)slot);
+    block_unbind_ops((unsigned)slot);
     for (unsigned i = 0; i < m->device_count; i++)
         if (m->devices[i] >= 0)
             device_set_state((uint32_t)m->devices[i], 0, ARK_DEV_STATE_ABSENT);
@@ -1058,6 +1413,61 @@ static void module_detail(const Module *m, char out[96]) {
             out[at++] = ',';
     }
     out[at] = 0;
+    /* Interrupt evidence: every bound line with its route and ISR count, or
+     * an explicit poll-only marker. Smoke gates read this, not the driver's
+     * own claims. */
+    int slot = (int)(m - modules);
+    bool any = false;
+    for (unsigned i = 0; i < MODULE_IRQ_LINES; i++) {
+        if (irq_owner[i] != slot)
+            continue;
+        char num[24], route[64];
+        platform_irq_describe(i, route, sizeof route);
+        strcopy(out + at, " irq", 96 - at);
+        at = strlen(out);
+        uint_to_str(i, num);
+        strcopy(out + at, num, 96 - at);
+        at = strlen(out);
+        strcopy(out + at, " ", 96 - at);
+        at = strlen(out);
+        /* "ioapic0 gsi11 vec43 level/high" is long; keep route kind + gsi. */
+        if (!strncmp(route, "ioapic", 6))
+            for (char *c = route; *c; c++)
+                if (!strncmp(c, " vec", 4)) {
+                    *c = 0;
+                    break;
+                }
+        strcopy(out + at, route[0] ? route : "unrouted", 96 - at);
+        at = strlen(out);
+        strcopy(out + at, " n=", 96 - at);
+        at = strlen(out);
+        uint_to_str(irq_count[i], num);
+        strcopy(out + at, num, 96 - at);
+        at = strlen(out);
+        any = true;
+    }
+    /* MSI/MSI-X evidence uses the same "n=" counter the smoke gates read; a
+     * driver that only polls never appears here. */
+    for (unsigned index = 0; at + 20 < 96; index++) {
+        unsigned vector;
+        uint64_t count;
+        if (!msi_owner_vector_at(slot, index, &vector, &count))
+            break;
+        char num[24];
+        strcopy(out + at, " msix", 96 - at);
+        at = strlen(out);
+        uint_to_str(vector, num);
+        strcopy(out + at, num, 96 - at);
+        at = strlen(out);
+        strcopy(out + at, " n=", 96 - at);
+        at = strlen(out);
+        uint_to_str(count, num);
+        strcopy(out + at, num, 96 - at);
+        at = strlen(out);
+        any = true;
+    }
+    if (!any && m->used && m->state == ARK_DRV_STATE_LOADED)
+        strcopy(out + at, m->has_poll ? " irq:none (poll-only)" : " irq:none", 96 - at);
 }
 /* Embedded (inbox) modules carry no manifest entry; LIST appends them after
  * manifest entries so dev drivers shows the NIC driver too. */
@@ -1174,6 +1584,17 @@ void module_test_reset(void) {
     memset(poll_slot_registered, 0, sizeof poll_slot_registered);
     memset(irq_owner, 0xff, sizeof irq_owner);
     memset(irq_fn, 0, sizeof irq_fn);
+    memset(irq_count, 0, sizeof irq_count);
+    memset(test_routed, 0, sizeof test_routed);
+    test_route_events = test_release_events = 0;
+    test_route_fail = 0;
+    test_disk_bound = false;
+    test_disk_owner = 0;
+    memset(test_msi_used, 0, sizeof test_msi_used);
+    memset(test_msi_isr, 0, sizeof test_msi_isr);
+    memset(test_msi_count, 0, sizeof test_msi_count);
+    test_msi_events = test_msi_release_events = 0;
+    test_msi_fail = 0;
     test_map_count = 0;
     test_entry = 0;
     initialized = true;
@@ -1204,6 +1625,11 @@ int module_slot_view(unsigned slot, ModuleSlotView *out) {
     out->version = m->version;
     out->devices = m->device_count;
     out->has_poll = m->has_poll;
+    for (unsigned i = 0; i < MODULE_IRQ_LINES; i++)
+        if (m->used && irq_owner[i] == (int)slot) {
+            out->irq_lines |= 1u << i;
+            out->irq_count += irq_count[i];
+        }
     out->image_bytes = m->image_bytes;
     strcopy(out->name, m->name, sizeof out->name);
     memcpy(out->sha256, m->sha256, 32);

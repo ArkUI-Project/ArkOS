@@ -22,6 +22,7 @@
 #include "storage.h"
 #include "pci.h"
 #include "module.h"
+#include "msi.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -98,12 +99,24 @@ bool block_read(BlockDevice *device, uint64_t lba, uint32_t sectors, void *buffe
     (void)buffer;
     return false;
 }
+bool block_write(BlockDevice *device, uint64_t lba, uint32_t sectors, const void *buffer) {
+    (void)device;
+    (void)lba;
+    (void)sectors;
+    (void)buffer;
+    return false;
+}
 bool block_flush(BlockDevice *device) {
     (void)device;
     return false;
 }
 const char *block_error(void) {
     return "no block device";
+}
+bool platform_map_mmio(uint64_t physical, uint64_t bytes) {
+    /* Host-test stand-in for kernel/mmio.c: only the range guard is observable
+     * here, so mirror its documented bounds (>=1 MiB, <=16 MiB per call). */
+    return physical >= 0x100000ull && bytes && bytes <= 16u * 1024 * 1024;
 }
 void process_wake(uint32_t pid) {
     (void)pid;
@@ -207,6 +220,21 @@ static void stub_poll(void) {
         host->device_add_counters((uint32_t)stub_device_index, 512, 128, 3, 0);
         host->device_notify((uint32_t)stub_device_index);
     }
+}
+/* A well-formed ArkBlockOps whose three callbacks the host must accept from a
+ * module during INIT. */
+static uint64_t stub_disk_sectors(void) {
+    return 2048;
+}
+static int stub_disk_transfer(uint64_t lba, uint32_t count, void *buffer, int write) {
+    (void)lba;
+    (void)count;
+    (void)buffer;
+    (void)write;
+    return 0;
+}
+static int stub_disk_flush(void) {
+    return 0;
 }
 static int64_t stub_entry(const ArkDriverHost *host, uint32_t op) {
     ++stub_entry_calls;
@@ -812,13 +840,17 @@ static void test_host_table(void) {
     uint64_t bar_base;
     CHECK(host->pci_bar_base(0x1800, 0, &bar_base) == -2); /* device has no BAR */
     CHECK(host->pci_bar_base(0x1800, 9, &bar_base) == -2);
-    /* MMIO alias guard: no zero, no zero length, nothing outside 4 GiB */
+    /* MMIO alias guard: no zero, no zero length, bounded size. Apertures below
+     * 4 GiB use the identity map; higher firmware windows are handed to
+     * platform_map_mmio and rejected when it refuses (here: over 16 MiB). */
     CHECK(host->map_mmio(0, 4096) == 0);
     CHECK(host->map_mmio(0x1000, 0) == 0);
     CHECK(host->map_mmio(0x1000, 1ull << 32) == 0);
     CHECK(host->map_mmio(0x1000, 128ull * 1024 * 1024) == 0);
-    CHECK(host->map_mmio(0xfffff000ull, 0x4000) == 0);
+    CHECK(host->map_mmio(0xfffff000ull, 0x4000) != 0); /* straddles 4 GiB */
     CHECK(host->map_mmio(0xf0000000ull, 4096) != 0);
+    CHECK(host->map_mmio(0xc000000000ull, 0x4000) != 0); /* high 64-bit BAR */
+    CHECK(host->map_mmio(0xc000000000ull, 32ull * 1024 * 1024) == 0);
     /* log must stay bounded and prefix every line */
     char big[512];
     memset(big, 'x', sizeof big - 1);
@@ -841,9 +873,13 @@ static void test_host_table(void) {
     module_test_set_loading(-1);
     CHECK(host->device_register_poll(stub_poll) == -22);
     CHECK(host->device_register_poll(0) == -22);
-    /* one PIC line per module, only during INIT; platform lines stay busy */
+    /* one ISA line per module, only during INIT; platform lines stay busy.
+     * route allocates delivery; a second owner of a live line fails. */
+    unsigned routes0 = 0, releases0 = 0;
+    CHECK(module_test_routed(&routes0, &releases0) == 0);
     module_test_set_loading(0);
     CHECK(host->irq_attach(9, stub_poll) == 0);
+    CHECK(module_test_routed(0, 0) == 1);
     CHECK(host->irq_attach(9, stub_poll) == -16);
     CHECK(host->irq_attach(0, stub_poll) == -16);
     CHECK(host->irq_attach(12, stub_poll) == -16);
@@ -854,11 +890,88 @@ static void test_host_table(void) {
     module_test_set_loading(-1);
     CHECK(host->irq_attach(5, stub_poll) == -22);
     /* a line bound to a slot that never finished loading is stale: dispatch
-     * masks and releases it instead of reaching dead code */
+     * releases the RTE instead of reaching dead code */
     CHECK(module_irq_dispatch(9) == 0);
+    CHECK(module_test_routed(0, 0) == 0); /* released */
+    unsigned routes1 = 0, releases1 = 0;
+    module_test_routed(&routes1, &releases1);
+    CHECK(releases1 > releases0);
+    /* reload: the same line reallocates exactly once, no leftover */
     module_test_set_loading(1);
     CHECK(host->irq_attach(9, stub_poll) == 0);
+    CHECK(module_test_routed(0, 0) == 1);
     module_test_set_loading(-1);
+    /* a platform that cannot allocate an RTE fails visibly (-19); the
+     * binding is not left half-installed. */
+    module_test_route_fail(-19);
+    module_test_set_loading(0);
+    CHECK(host->irq_attach(5, stub_poll) == -19);
+    module_test_route_fail(0);
+    CHECK(module_test_routed(0, 0) == 1); /* only irq9 from slot 1 */
+    /* one module disk per load window: the host validates the ops table and
+     * delegates bind / refuse / release. */
+    ArkBlockOps disk = {.sectors = stub_disk_sectors,
+                        .transfer = stub_disk_transfer,
+                        .flush = stub_disk_flush};
+    CHECK(module_test_block(0) == 0);
+    module_test_set_loading(-1);
+    CHECK(host->block_attach(&disk) == -22); /* no load window */
+    module_test_set_loading(0);
+    CHECK(host->block_attach(0) == -22);
+    ArkBlockOps incomplete = {.sectors = stub_disk_sectors};
+    CHECK(host->block_attach(&incomplete) == -22);
+    CHECK(host->block_attach(&disk) == 1); /* returns the block unit */
+    CHECK(module_test_block(0) == 1);
+    CHECK(host->block_attach(&disk) == -16); /* one disk at a time */
+    host->block_detach();
+    CHECK(module_test_block(0) == 0);
+    CHECK(host->block_attach(&disk) == 1); /* reattach after release */
+    module_test_set_loading(1);
+    CHECK(host->block_attach(&disk) == -16); /* another slot cannot steal it */
+    module_test_set_loading(-1);
+    host->block_detach(); /* outside a window: no-op */
+    CHECK(module_test_block(0) == 1);     /* still bound to slot 0 */
+    /* MSI-X: the host validates the arguments and window, then hands the
+     * request to msi.c. Each attach gets its own vector; release is per owner
+     * and a stale binding is dropped instead of reaching dead code. */
+    unsigned msi_events0 = 0, msi_releases0 = 0;
+    CHECK(module_test_msi(&msi_events0, &msi_releases0) == 0);
+    uint32_t msi_vec = 0;
+    CHECK(host->msi_attach(0x1800, stub_poll, &msi_vec) == -22); /* no window */
+    module_test_set_loading(0);
+    CHECK(host->msi_attach(0x1800, 0, &msi_vec) == -22);
+    CHECK(host->msi_attach(0x1800, stub_poll, 0) == -22);
+    CHECK(host->msi_attach(0x1800, stub_poll, &msi_vec) == 0);
+    CHECK(msi_vec == 0x40);
+    CHECK(msi_vector_owner(msi_vec) == 0);
+    CHECK(module_test_msi(0, 0) == 1);
+    /* slot 0 never finished loading: dispatch releases the vector. */
+    CHECK(module_msi_dispatch(msi_vec) == 0);
+    CHECK(module_test_msi(0, 0) == 0);
+    unsigned msi_events1 = 0, msi_releases1 = 0;
+    module_test_msi(&msi_events1, &msi_releases1);
+    CHECK(msi_releases1 > msi_releases0);
+    /* two functions get distinct vectors; detach frees them all. */
+    uint32_t msi_vec2 = 0;
+    CHECK(host->msi_attach(0x1800, stub_poll, &msi_vec) == 0);
+    CHECK(host->msi_attach(0x1900, stub_poll, &msi_vec2) == 0);
+    CHECK(msi_vec != msi_vec2);
+    CHECK(module_test_msi(0, 0) == 2);
+    host->msi_detach();
+    CHECK(module_test_msi(0, 0) == 0);
+    /* exhaustion fails visibly rather than aliasing a live vector. */
+    uint32_t v = 0;
+    for (unsigned i = 0; i < 4; i++)
+        CHECK(host->msi_attach(0x2000 + i * 0x100, stub_poll, &v) == 0);
+    CHECK(host->msi_attach(0x2400, stub_poll, &v) == -16);
+    host->msi_detach();
+    CHECK(module_test_msi(0, 0) == 0);
+    /* a platform that cannot deliver MSI fails visibly. */
+    module_test_msi_fail(-19);
+    CHECK(host->msi_attach(0x1800, stub_poll, &v) == -19);
+    module_test_msi_fail(0);
+    module_test_set_loading(-1);
+    host->msi_detach(); /* outside a window: no-op */
     /* counters and state against a missing node */
     CHECK(host->device_add_counters(9999, 1, 1, 1, 1) == -22);
     CHECK(host->device_set_state(9999, ARK_DEV_PRESENT, ARK_DEV_STATE_OK) == -22);

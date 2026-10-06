@@ -76,6 +76,10 @@ void pci_write16(uint32_t bdf, unsigned offset, uint16_t value) {
     out32(0xcf8, 0x80000000u | bdf | (offset & 0xfcu));
     out16((uint16_t)(0xcfc + (offset & 2)), value);
 }
+void pci_write32(uint32_t bdf, unsigned offset, uint32_t value) {
+    out32(0xcf8, 0x80000000u | bdf | (offset & 0xfcu));
+    out32(0xcfc, value);
+}
 void pci_command(uint32_t bdf, uint16_t bits) {
     pci_write16(bdf, 4, (uint16_t)(pci_read(bdf, 4) | bits));
 }

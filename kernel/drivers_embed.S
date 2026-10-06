@@ -9,7 +9,11 @@
  * e1000: network adapter driver (sdk/driver_e1000.c). Keeping the NIC driver
  * in the image means a bare ISO boot, a non-ArkFS disk and a fresh install
  * all have networking; without it the driver could only come from the
- * very medium it is needed to reach. */
+ * very medium it is needed to reach.
+ *
+ * nvme: PCIe NVM storage driver (sdk/driver_nvme.c). MSI-X only on QEMU, so
+ * it also exercises the kernel's dynamic MSI-X vector path. It declines to
+ * bind when no controller is present. */
     .section .rodata
     .balign 8
     .globl _arkos_driver_e1000_start
@@ -20,4 +24,10 @@ _arkos_driver_e1000_start:
      * would read as a corrupt image. */
     .globl _arkos_driver_e1000_end
 _arkos_driver_e1000_end:
+    .balign 8
+    .globl _arkos_driver_nvme_start
+_arkos_driver_nvme_start:
+    .incbin "build/nvme.arco"
+    .globl _arkos_driver_nvme_end
+_arkos_driver_nvme_end:
     .section .note.GNU-stack,"",@progbits

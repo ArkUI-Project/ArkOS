@@ -26,7 +26,9 @@ build/module_asm.o: kernel/module_asm.S | build
 # bare ISO, foreign disk, fresh install — has networking before any manifest.
 build/e1000.arco: sdk/driver_e1000.c scripts/arco.py scripts/arco.ld $(wildcard include/*.h) | build
 	python3 scripts/arco.py sdk/driver_e1000.c -o $@ --name e1000 --version 1.0.0
-build/drivers_embed.o: kernel/drivers_embed.S build/e1000.arco | build
+build/nvme.arco: sdk/driver_nvme.c scripts/arco.py scripts/arco.ld $(wildcard include/*.h) | build
+	python3 scripts/arco.py sdk/driver_nvme.c -o $@ --name nvme --version 1.0.0
+build/drivers_embed.o: kernel/drivers_embed.S build/e1000.arco build/nvme.arco | build
 	$(CC) -m64 -ffreestanding -fno-pie -c $< -o $@
 build/kernel.elf: $(OBJECTS) boot/linker.ld
 	$(LD) $(LDFLAGS) $(OBJECTS) $(BEARSSL_OBJECTS) -o $@
@@ -89,6 +91,14 @@ check-device-host: | build
 check-module-host: | build
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -DARK_MODULE_HOST_TEST -DARK_DEVICE_HOST_TEST -DARK_PCI_HOST_TEST -DARK_BLOB_HOST_TEST -Iinclude tests/module_host_test.c kernel/module.c kernel/device.c kernel/pci.c kernel/blob.c kernel/sha256.c kernel/lib.c kernel/alloc.c -o build/module-host-test
 	ASAN_OPTIONS=detect_leaks=0 ./build/module-host-test
+.PHONY: check-ioapic-host
+check-ioapic-host: | build
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -Iinclude tests/ioapic_host_test.c -o build/ioapic-host-test
+	./build/ioapic-host-test
+.PHONY: check-msi-host
+check-msi-host: | build
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -Iinclude tests/msi_host_test.c -o build/msi-host-test
+	./build/msi-host-test
 check-protection: iso
 	ARK_SMP_TEST=1 python3 tests/process_test.py
 	python3 tests/process_api_test.py

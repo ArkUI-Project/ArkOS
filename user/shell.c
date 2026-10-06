@@ -703,7 +703,52 @@ static bool builtin(Stage *s, const char *input, Output *out) {
             line(out, q.name);
             return true;
         }
-        return fail("Usage: dev [list|drivers|query NAME|install PATH|remove NAME]");
+        if (same(a[1], "blk")) {
+            /* `dev blk UNIT read|write LBA COUNT` drives a real block transfer
+             * for diagnostics and driver gates. WRITE is system-only; the
+             * kernel re-checks the node, the range and the ArkFS-system-volume
+             * exclusion, so this cannot touch the running system disk. */
+            if (!usage(argc == 6, "Usage: dev blk UNIT read|write LBA COUNT"))
+                return false;
+            size_t unit, lba, sectors;
+            if (!unsigned_value(a[2], &unit) || unit > 1 || !unsigned_value(a[4], &lba) ||
+                !unsigned_value(a[5], &sectors) || !sectors || sectors > ARK_DEV_READ_SECTORS)
+                return fail("dev blk: bad unit, LBA or sector count.");
+            bool write = same(a[3], "write");
+            if (!write && !same(a[3], "read"))
+                return fail("Usage: dev blk UNIT read|write LBA COUNT");
+            uint32_t index = UINT32_MAX;
+            for (unsigned i = 0;; i++) {
+                ArkDeviceRequest scan = {.op = ARK_DEV_ENUMERATE, .index = i};
+                int64_t r = ark_device(&scan);
+                if (r == -2)
+                    break;
+                if (r < 0)
+                    return fail(scan.error[0] ? scan.error : "Device inventory is unavailable.");
+                if (scan.info.class_id == ARK_DEV_CLASS_BLOCK && scan.info.unit == unit) {
+                    index = scan.info.index;
+                    break;
+                }
+            }
+            if (index == UINT32_MAX)
+                return fail("dev blk: no such block unit.");
+            static uint8_t io[ARK_DEV_READ_SECTORS * 512u];
+            memset(io, 0, sizeof io);
+            ArkDeviceRequest d = {0};
+            d.op = write ? ARK_DEV_WRITE : ARK_DEV_READ;
+            d.index = index;
+            d.buffer = (uint64_t)(uintptr_t)io;
+            d.offset = lba;
+            d.sectors = (uint32_t)sectors;
+            d.capacity = (uint32_t)(sectors * 512u);
+            if (ark_device(&d) < 0)
+                return fail(d.error[0] ? d.error : "Block request failed.");
+            put(out, write ? "Wrote " : "Read ");
+            num(out, d.count);
+            line(out, " sectors.");
+            return true;
+        }
+        return fail("Usage: dev [list|drivers|query NAME|install PATH|remove NAME|blk UNIT read|write LBA COUNT]");
     }
     if (same(cmd, "pkg")) {
         if (!usage(argc >= 2, "Usage: pkg list|info|install|upgrade|remove|grant|run ..."))

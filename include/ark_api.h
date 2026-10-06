@@ -427,7 +427,8 @@ enum {
     ARK_DEV_QUERY = 1,
     ARK_DEV_STATS = 2,
     ARK_DEV_READ = 3,
-    ARK_DEV_CONTROL = 4
+    ARK_DEV_CONTROL = 4,
+    ARK_DEV_WRITE = 5
 };
 enum { ARK_DEVCTL_FLUSH = 1, ARK_DEVCTL_REFRESH = 2 };
 enum {
@@ -462,8 +463,10 @@ typedef struct {
     char error[128];
     ArkDeviceInfo info;
 } ArkDeviceRequest;
-/* READ on a BLOCK node copies ARK_DEV_READ_CAP bounded sectors into buffer. The
- * ArkFS system volume is never readable this way and no class has a write path. */
+/* READ on a BLOCK node copies ARK_DEV_READ_CAP bounded sectors into buffer.
+ * WRITE is system-only and copies bounded sectors from buffer into a
+ * non-system BLOCK node. The ArkFS system volume is never reachable either
+ * way, and WRITE requires the SYSTEM capability on top of an active session. */
 enum {
     ARK_DRV_LIST = 0,
     ARK_DRV_QUERY = 1,

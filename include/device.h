@@ -42,6 +42,10 @@ bool device_read_allowed(uint32_t pid, uint64_t now_ms);
 /* Read-only sector access used by SYS_DEVICE. Rejects absent, unreadable and
  * ArkFS system volumes; the caller still validates the user buffer bounds. */
 bool device_block_read(uint32_t index, uint64_t lba, uint32_t sectors, void *buffer);
+/* System-only sector write used by SYS_DEVICE. Same node/range checks as the
+ * read path and the same ArkFS-system-volume exclusion, so the running system
+ * disk can never be written through this call. */
+bool device_block_write(uint32_t index, uint64_t lba, uint32_t sectors, const void *buffer);
 bool device_block_flush(uint32_t index);
 /* Boot-time inventory built from every driver's real status. Call once after the
  * last driver has probed hardware and before the desktop is started. */

@@ -57,6 +57,16 @@ typedef struct {
     void (*read_mac)(uint8_t out[6]);
 } ArkNetOps;
 
+/* Block operations a storage driver installs with host->block_attach. Copied
+ * at attach time; pointers must stay inside the module RX window until
+ * block_detach or removal. transfer/flush run on the caller's stack and must
+ * be bounded and non-blocking. sectors is the capacity of the bound unit. */
+typedef struct {
+    uint64_t (*sectors)(void);
+    int (*transfer)(uint64_t lba, uint32_t count, void *buffer, int write);
+    int (*flush)(void);
+} ArkBlockOps;
+
 /* Function table handed to the driver at INIT. Every entry is a kernel
  * function chosen for a narrow job; there is no access to user pointers,
  * process state or page tables. Order is ABI: append only. */
@@ -96,17 +106,37 @@ typedef struct {
     /* net_detach unbinds this module's NIC ops; the network stack stops
      * calling them immediately. The loader also force-detaches on removal. */
     void (*net_detach)(void);
-    /* irq_attach binds isr to one legacy PIC line (0..15): the kernel checks
-     * isr against the calling module's RX code window, unmasks the line and
-     * runs isr in interrupt context on the module stack before EOI. The ISR
-     * must be bounded, must not allocate, block, log or call host services;
-     * it only acknowledges the device and records state the poll callback or
-     * net ops consume. One owner per line; kernel-owned lines (timer, PS/2)
-     * and lines already claimed return -16. Callable only from arco_entry;
-     * removal masks the line and releases the binding. NULL on hosts without
-     * interrupt dispatch — drivers must keep a pure-polling fallback. */
+    /* irq_attach binds isr to one ISA line (0..15). The kernel checks isr
+     * against the calling module's RX code window, allocates delivery for that
+     * line (IOAPIC redirection entry when the MADT lists one, else 8259 PIC
+     * IMR), and runs isr in interrupt context on the module stack before EOI.
+     * The ISR must be bounded, must not allocate, block, log or call host
+     * services; it only acknowledges the device and records state the poll
+     * callback or net ops consume. One owner per line; kernel-owned lines
+     * (timer, PS/2) and lines already claimed return -16; a missing IOAPIC
+     * pin returns -19. Callable only from arco_entry; removal releases the
+     * RTE / masks the PIC line. Drivers that cannot attach must not claim
+     * interrupt success — poll-only cannot pass the IOAPIC smoke gate.
+     * MSI/MSI-X functions use msi_attach instead of a legacy line. */
     int (*irq_attach)(uint32_t irq, void (*isr)(void));
-    uint32_t reserved[5];                   /* zero; future entries appended here */
+    /* block_attach binds one ArkBlockOps as a machine disk (one module disk at
+     * a time; -16 when already bound). Returns the block unit (0 or 1) on
+     * success so the driver can register its own BLOCK device node with that
+     * unit; callable only from arco_entry. */
+    int (*block_attach)(const void *ops);
+    void (*block_detach)(void);
+    /* msi_attach allocates one MSI-X vector for the calling module and programs
+     * the function's MSI-X table entry (bdf from pci_find/pci_device); the
+     * kernel owns the capability, so the driver never writes the table itself.
+     * isr must live in this module's RX code window and runs in interrupt
+     * context on the module stack like irq_attach. Returns 0 and the IDT
+     * vector, or -12 no MMIO mapping, -16 no free vector / table entry, -19 no
+     * usable MSI-X capability, BAR or LAPIC, -22 bad argument. Callable only
+     * from arco_entry; module removal masks and releases every vector. */
+    int (*msi_attach)(uint32_t bdf, void (*isr)(void), uint32_t *vector_out);
+    /* msi_detach masks and frees this module's MSI-X vectors. */
+    void (*msi_detach)(void);
+    uint32_t reserved[1];                   /* zero; future entries appended here */
 } ArkDriverHost;
 
 /* Entry point every .arco image exports (symbol arco_entry). op is
