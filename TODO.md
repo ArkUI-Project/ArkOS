@@ -37,8 +37,16 @@ https://github.com/heDuke/ArkOS/tree/device/13700h-drivers
 
 | Commit | 内容 | 状态 |
 |---|---|---|
-| `5c1e645` | IOAPIC：MADT 解析 + IRQ→IOAPIC 路由 | 半成品；主机测当时未完全绿就停了 |
-| `8f01927` | NVMe 用的 `block_attach` 脚手架 | 半成品，未接真 NVMe |
+| `5c1e645` | IOAPIC：MADT 解析 + IRQ→IOAPIC 路由 | 已绿：`check-ioapic-host` + `ioapic_vm_test` 三门通过 |
+| `8f01927` | NVMe 用的 `block_attach` 脚手架 | 已接真 NVMe（见下） |
+
+**后续（分支 `feat/msix-nvme`，基于本轨 tip）**：实现内核 MSI-X（`kernel/msi.c`，向量 `0x40..0xEF`）与 NVMe `.arco`（`sdk/driver_nvme.c`），满足门禁 5——`tests/nvme_vm_test.py` 三门在 QEMU q35 通过（读/写各一次 ISR 计数上涨、`dev remove` 后 `msi vectors released n=1`、重装回收同一向量）。主机测试 `check-module-host check-device-host check-ioapic-host check-msi-host` 全绿；`ioapic_vm_test` 无回归。
+
+尚未完成 / 如实标注：
+
+- **仅 QEMU q35 验证，未在真机 13700H 上跑**；实机固件 `_PRT`、MSI-X 表 BAR 布局与 NVMe 控制器行为需再验。
+- **MSI（cap `0x05`）未实现**；QEMU 的 `e1000` 只有 MSI，故 MSI-X 冒烟改由 NVMe 完成。纯 INTx 设备（RTL8168）仍缺 `_PRT` + GSI 16+ 向量分配。
+- xHCI / RTL8168 驱动未开工。
 
 用户说明：**IOAPIC 交给其他人处理**；Helper 已停手，本地改动已推 fork。
 
@@ -99,7 +107,7 @@ https://github.com/heDuke/ArkOS/tree/device/13700h-drivers
 
 1. 确认/催合 **#7** → 合入 tip 打 ISO（UEFI）冒烟
 2. 开小 PR：加密角标一眼确认 +（可选）账户迁盘 / BIOS 说明文档
-3. 从 `device/13700h-drivers` @ `8f01927` 接手：**先把 IOAPIC 主机测编绿并满足门禁 5**，再开 NVMe `.arco`
+3. IOAPIC 主机测已编绿、门禁 5 已由 MSI-X + NVMe `.arco` 满足（分支 `feat/msix-nvme`）；下一步是**在真机 13700H 上复核**，并补 MSI（cap `0x05`）与 `_PRT`
 4. 实机 13700H：P0 NVMe + xHCI，再 RTL8168
 
 ## 相关链接速查
