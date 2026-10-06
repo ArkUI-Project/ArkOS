@@ -47,6 +47,9 @@ void module_test_set_loading(int slot);
  * release events; route_fail forces platform_irq_route to return rc. */
 unsigned module_test_routed(unsigned *routes, unsigned *releases);
 void module_test_route_fail(int rc);
+/* Stateful block-bind stub: returns 1 while a module disk is bound and reports
+ * its owner, so the harness can assert bind/refuse/release through the host. */
+unsigned module_test_block(unsigned *owner);
 #endif
 
 #endif

@@ -208,6 +208,21 @@ static void stub_poll(void) {
         host->device_notify((uint32_t)stub_device_index);
     }
 }
+/* A well-formed ArkBlockOps whose three callbacks the host must accept from a
+ * module during INIT. */
+static uint64_t stub_disk_sectors(void) {
+    return 2048;
+}
+static int stub_disk_transfer(uint64_t lba, uint32_t count, void *buffer, int write) {
+    (void)lba;
+    (void)count;
+    (void)buffer;
+    (void)write;
+    return 0;
+}
+static int stub_disk_flush(void) {
+    return 0;
+}
 static int64_t stub_entry(const ArkDriverHost *host, uint32_t op) {
     ++stub_entry_calls;
     stub_seen_millis = host->millis();
@@ -876,6 +891,29 @@ static void test_host_table(void) {
     CHECK(host->irq_attach(5, stub_poll) == -19);
     module_test_route_fail(0);
     CHECK(module_test_routed(0, 0) == 1); /* only irq9 from slot 1 */
+    /* one module disk per load window: the host validates the ops table and
+     * delegates bind / refuse / release. */
+    ArkBlockOps disk = {.sectors = stub_disk_sectors,
+                        .transfer = stub_disk_transfer,
+                        .flush = stub_disk_flush};
+    CHECK(module_test_block(0) == 0);
+    module_test_set_loading(-1);
+    CHECK(host->block_attach(&disk) == -22); /* no load window */
+    module_test_set_loading(0);
+    CHECK(host->block_attach(0) == -22);
+    ArkBlockOps incomplete = {.sectors = stub_disk_sectors};
+    CHECK(host->block_attach(&incomplete) == -22);
+    CHECK(host->block_attach(&disk) == 0);
+    CHECK(module_test_block(0) == 1);
+    CHECK(host->block_attach(&disk) == -16); /* one disk at a time */
+    host->block_detach();
+    CHECK(module_test_block(0) == 0);
+    CHECK(host->block_attach(&disk) == 0); /* reattach after release */
+    module_test_set_loading(1);
+    CHECK(host->block_attach(&disk) == -16); /* another slot cannot steal it */
+    module_test_set_loading(-1);
+    host->block_detach(); /* outside a window: no-op */
+    CHECK(module_test_block(0) == 1);     /* still bound to slot 0 */
     /* counters and state against a missing node */
     CHECK(host->device_add_counters(9999, 1, 1, 1, 1) == -22);
     CHECK(host->device_set_state(9999, ARK_DEV_PRESENT, ARK_DEV_STATE_OK) == -22);

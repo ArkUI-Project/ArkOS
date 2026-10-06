@@ -668,6 +668,28 @@ void net_unbind_nic(unsigned owner) {
     if (test_nic_bound && test_nic_owner == owner)
         test_nic_bound = false;
 }
+/* No block layer in the harness either; the same stateful contract lets the
+ * harness assert bind/refuse/release through host->block_attach. */
+static bool test_disk_bound;
+static unsigned test_disk_owner;
+int block_bind_ops(const void *ops, unsigned owner) {
+    if (!ops)
+        return -22;
+    if (test_disk_bound)
+        return -16;
+    test_disk_bound = true;
+    test_disk_owner = owner;
+    return 0;
+}
+void block_unbind_ops(unsigned owner) {
+    if (test_disk_bound && test_disk_owner == owner)
+        test_disk_bound = false;
+}
+unsigned module_test_block(unsigned *owner) {
+    if (owner)
+        *owner = test_disk_bound ? test_disk_owner : 0;
+    return test_disk_bound ? 1u : 0u;
+}
 #endif
 static int host_net_attach(const void *ops) {
     if (loading_slot < 0)
@@ -1353,6 +1375,8 @@ void module_test_reset(void) {
     memset(test_routed, 0, sizeof test_routed);
     test_route_events = test_release_events = 0;
     test_route_fail = 0;
+    test_disk_bound = false;
+    test_disk_owner = 0;
     test_map_count = 0;
     test_entry = 0;
     initialized = true;

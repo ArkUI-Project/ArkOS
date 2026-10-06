@@ -70,13 +70,13 @@ static unsigned build_madt(uint8_t *buf, size_t cap, int with_ioapic, int with_i
 }
 
 int main(void) {
-    uint8_t madt[256];
+    uint8_t madt[256] = {0};
     IoApicTopology t;
     unsigned n;
 
     printf("ioapic_parse: empty\n");
     CHECK(ioapic_parse_madt(0, 0, &t) == 0);
-    CHECK(ioapic_parse_madt(madt, 20, &t) == 0);
+    CHECK(ioapic_parse_madt(madt, 20, &t) == 0); /* zeroed header: magic mismatch */
 
     printf("ioapic_parse: no IOAPIC\n");
     n = build_madt(madt, sizeof madt, 0, 0);
