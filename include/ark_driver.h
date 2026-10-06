@@ -120,7 +120,9 @@ typedef struct {
      * MSI/MSI-X functions use msi_attach instead of a legacy line. */
     int (*irq_attach)(uint32_t irq, void (*isr)(void));
     /* block_attach binds one ArkBlockOps as a machine disk (one module disk at
-     * a time; -16 when already bound). Callable only from arco_entry. */
+     * a time; -16 when already bound). Returns the block unit (0 or 1) on
+     * success so the driver can register its own BLOCK device node with that
+     * unit; callable only from arco_entry. */
     int (*block_attach)(const void *ops);
     void (*block_detach)(void);
     /* msi_attach allocates one MSI-X vector for the calling module and programs

@@ -99,6 +99,13 @@ bool block_read(BlockDevice *device, uint64_t lba, uint32_t sectors, void *buffe
     (void)buffer;
     return false;
 }
+bool block_write(BlockDevice *device, uint64_t lba, uint32_t sectors, const void *buffer) {
+    (void)device;
+    (void)lba;
+    (void)sectors;
+    (void)buffer;
+    return false;
+}
 bool block_flush(BlockDevice *device) {
     (void)device;
     return false;
@@ -904,12 +911,12 @@ static void test_host_table(void) {
     CHECK(host->block_attach(0) == -22);
     ArkBlockOps incomplete = {.sectors = stub_disk_sectors};
     CHECK(host->block_attach(&incomplete) == -22);
-    CHECK(host->block_attach(&disk) == 0);
+    CHECK(host->block_attach(&disk) == 1); /* returns the block unit */
     CHECK(module_test_block(0) == 1);
     CHECK(host->block_attach(&disk) == -16); /* one disk at a time */
     host->block_detach();
     CHECK(module_test_block(0) == 0);
-    CHECK(host->block_attach(&disk) == 0); /* reattach after release */
+    CHECK(host->block_attach(&disk) == 1); /* reattach after release */
     module_test_set_loading(1);
     CHECK(host->block_attach(&disk) == -16); /* another slot cannot steal it */
     module_test_set_loading(-1);

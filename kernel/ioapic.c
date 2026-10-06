@@ -330,7 +330,7 @@ bool ioapic_init(void) {
     put(&t, x2apic ? "x2APIC" : "xAPIC");
     put(&t, " id ");
     num(&t, bsp_id);
-    put(&t, " physical; VT-d interrupt remapping not used (compat RTEs); MSI/MSI-X TODO\n");
+    put(&t, " physical; VT-d interrupt remapping not used (compat RTEs); MSI-X via kernel/msi.c\n");
     serial_write(line);
     active = true;
     return true;

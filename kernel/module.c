@@ -510,7 +510,15 @@ static void module_irq_release(unsigned slot) {
  * interrupts is a single call. Masks each device entry before the vector is
  * reusable, so no ISR can run while the module is torn down. */
 static void module_msi_release(unsigned slot) {
+    unsigned released = msi_owner_vectors((int)slot);
     msi_release((int)slot);
+    if (released) {
+        char n[8];
+        serial_write("[irq] msi vectors released n=");
+        uint_to_str(released, n);
+        serial_write(n);
+        serial_write("\n");
+    }
 }
 static void irq_attach_log(uint32_t irq, int rc, const char *why) {
     char text[160], n[24];
@@ -703,7 +711,7 @@ int block_bind_ops(const void *ops, unsigned owner) {
         return -16;
     test_disk_bound = true;
     test_disk_owner = owner;
-    return 0;
+    return 1; /* a fixed unit so the harness can assert the slot propagates */
 }
 void block_unbind_ops(unsigned owner) {
     if (test_disk_bound && test_disk_owner == owner)
@@ -1111,10 +1119,12 @@ static int module_load(const uint8_t *file, size_t bytes) {
     int64_t rc = module_call(m, m->entry, ARCO_OP_INIT);
     loading_slot = -1;
     if (rc < 0) {
-        /* INIT may have bound IRQ lines or MSI vectors before failing;
-         * release them. */
+        /* INIT may have bound IRQ lines, MSI vectors, a NIC or a disk before
+         * failing; force every binding off so a FAILED slot owns nothing. */
         module_irq_release((unsigned)slot);
         module_msi_release((unsigned)slot);
+        net_unbind_nic((unsigned)slot);
+        block_unbind_ops((unsigned)slot);
         m->state = ARK_DRV_STATE_FAILED;
         strcopy(m->detail, "module init rejected the load", sizeof m->detail);
         fail("module init rejected the load");
@@ -1157,10 +1167,12 @@ static int module_activate(const ManifestEntry *e, const uint8_t *file,
  * entry; removing one lasts until the next boot. */
 #ifndef ARK_MODULE_HOST_TEST
 extern const uint8_t _arkos_driver_e1000_start[], _arkos_driver_e1000_end[];
+extern const uint8_t _arkos_driver_nvme_start[], _arkos_driver_nvme_end[];
 static const struct {
     const uint8_t *start, *end;
 } embedded_drivers[] = {
     {_arkos_driver_e1000_start, _arkos_driver_e1000_end},
+    {_arkos_driver_nvme_start, _arkos_driver_nvme_end},
 };
 #endif
 static void module_load_embedded(void) {

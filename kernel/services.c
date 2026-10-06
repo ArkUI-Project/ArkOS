@@ -637,7 +637,7 @@ static int64_t device_service(uint64_t addr, uint64_t size) {
     uint32_t index = UINT32_MAX;
     if (q.op == ARK_DEV_ENUMERATE)
         index = device_index_at(q.index);
-    else if (q.op <= ARK_DEV_CONTROL)
+    else if (q.op <= ARK_DEV_WRITE)
         index = q.index;
     else
         return EINVAL;
@@ -671,6 +671,28 @@ static int64_t device_service(uint64_t addr, uint64_t size) {
         else
             q.count = q.sectors;
         memset(staging, 0, sizeof staging);
+    } else if (q.op == ARK_DEV_WRITE) {
+        /* System-only: a granted app may read a block device, but only the
+         * kernel-side SYSTEM capability may write one. Same bounds and
+         * system-volume exclusion as the read path. */
+        if (!system_caller())
+            return EPERM;
+        if (node->class_id != ARK_DEV_CLASS_BLOCK)
+            return EINVAL;
+        if (!q.sectors || q.sectors > ARK_DEV_READ_SECTORS ||
+            q.capacity != q.sectors * 512u || q.capacity > ARK_DEV_READ_CAP || q.buffer < PROCESS_USER_BASE)
+            return EINVAL;
+        if (!process_user_range(q.buffer, q.capacity, false))
+            return EFAULT;
+        if (!process_copy_from_user(staging, q.buffer, q.capacity)) {
+            memset(staging, 0, sizeof staging);
+            return EFAULT;
+        }
+        bool ok = device_block_write(index, q.offset, q.sectors, staging);
+        memset(staging, 0, sizeof staging);
+        if (!ok)
+            return reply(addr, &q, sizeof q, -5);
+        q.count = q.sectors;
     } else if (q.op == ARK_DEV_CONTROL) {
         if (q.control == ARK_DEVCTL_REFRESH) {
             if (!cap(ARK_CAP_DEVICE))

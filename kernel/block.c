@@ -256,7 +256,9 @@ int block_bind_ops(const void *ops, unsigned owner) {
     devices[slot].present = true;
     devices[slot].sectors = sec;
     error_text = "";
-    return 0;
+    /* Return the block unit, not just success: the driver registers its own
+     * BLOCK device node with this unit so ARK_DEV_READ can reach the disk. */
+    return slot;
 }
 void block_unbind_ops(unsigned owner) {
     if (!module_ops || module_owner != owner)
